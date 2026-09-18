@@ -1,0 +1,11 @@
+﻿FLAGS=pii_detected:phone,llm_fallback_used:compose SOURCES=Sandbox environment.pptx IMAGE_SNIPPETS=0 RETRIEVAL_MODE=dossier TEXT_CHARS=13777 TEXT_HEAD_START # Create A Professional Formal Documentation Package Based On The Available Siemens Healthineers Workspace Materials, Covering Purpose, Scope, Architecture, Governance, Workflow, Risks, Implementation Steps, And Next Actions.
+
+## Objective
+Create a professional formal documentation package based on the available Siemens Healthineers workspace materials, covering purpose, scope, architecture, governance, workflow, risks, implementation steps, and next actions.
+
+## Executive Overview
+
+nboarding externals from startups as .ext employees Business Specific Lead Time: X Days PKI and email ID issuance to the startup for setup HR Lead Time: X Days Sandbox Environment Setup for Vendor Evaluation: Mohd, Niharika, Kaushik, Kiran, Pranab, Kishore, and Kathirvel discussed the requirements, architecture, and process for setting up a sandbox environment in Azure to evaluate third-party AI vendor solutions for Siemens Healthineers, including the use of VMs, LLM access, and resource group management.
+Project Context and Objectives: Mohd introduced the goal of creating a sandbox environment to evaluate external vendors' AI solutions using Siemens Healthineers' code repositories, aiming to assess their fit for the software development lifecycle. ests for necessary admin accounts (e.g., AD001) will be raised in the appropriate system (Gamma). Technical Considerations for VM and Network Configuration: Pranab, Kathirvel, and Niharika discussed technical details regarding VM specifications, containerization, network isolation, and future-proofing the sandbox environment for scalability and security.
+
+Code check-in by the business | Looping in SCM team Yash Krishan (PL & SM), Deepesh Genani, Bharath Kumar K, Nihit Gupta Continuum : Evokes an unbroken thread of context and execution â sounds  TEXT_HEAD_END ARTIFACTS=live-confirm-2.pdf|/artifacts/1c241359-a4f2-48ac-9a29-4e36a82bc839

@@ -1,0 +1,33 @@
+name: doc-optimizer-agent
+version: 0.1.0
+mode: enterprise-private
+
+objectives:
+  - optimize_document_quality
+  - enforce_policy_and_audit
+  - minimize_data_exposure
+
+workflow:
+  - step: pre_policy_scan
+    action: detect_sensitive_data
+  - step: retrieval_context
+    action: fetch_related_guidelines
+  - step: optimize
+    action: call_private_llm
+  - step: post_policy_scan
+    action: validate_output
+  - step: audit
+    action: persist_request_trace
+
+tools:
+  - name: vector_search
+    endpoint: qdrant
+  - name: llm_generate
+    endpoint: private_llm
+  - name: policy_guard
+    endpoint: local_policy_engine
+
+deployment_constraints:
+  network: private_only
+  outbound_internet: false
+  storage_encryption: required

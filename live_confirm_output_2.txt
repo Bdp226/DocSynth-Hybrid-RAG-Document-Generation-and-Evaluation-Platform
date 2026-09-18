@@ -1,0 +1,24 @@
+﻿FLAGS=pii_detected:phone,llm_fallback_used:compose SOURCES=Sandbox environment.pptx, preview-dossier-modular.pdf IMAGE_SNIPPETS=0 RETRIEVAL_MODE=dossier TEXT_CHARS=20932 TEXT_HEAD_START # Give Me Comprehensive Dcoumentation Along With Images Included
+
+## Objective
+Give me comprehensive dcoumentation along with images included
+
+## Executive Overview
+
+t team, Azure Solution Architects and SMEs to define Sandbox Architecture Creating tickets for resource group creation and Azure DevOps Projects and coordinating with relevant stakeholders for execution
+Raising demand request for LLM access points and coordination with IT business partner and global infrastructure team for execution and access Setting up admin accounts for accessing resources
+Total one time effort to set-up Sandbox 4700 to be distributed along line items
+Effort estimation for Healthcare AI- Potpie pilot/MVP HW and SW requirements for sandbox setup from vendor
+Pilot/MVP engagement management (End-to-e Immediate Action Steps: Mohd summarized that the team will complete the resource group request, with Kaushik assisting on the LLM demand template.
+
+Explain the business context, intended outcomes, scope, and why the sandbox initiative exists.
+
+32 USD is with markup, reduce the margins from effort Effort estimation for SDLC AI solution- HCL pilot/MVP
+HW and SW requirements for sandbox setup from vendor Sandbox resource setup for the pilot
+ContextIQ : Directly signals the differentiator â it's smart because it knows your project Effort estimation for SDLC AI solution- Potpie pilot/MVP
+Effort estimation for SDLC AI solution- Potpie pilot/ Continuum : Evokes an unbroken thread of context and execution â sounds premium in an exec deck
+NDA set-up, Pilot Agreement, Vendor Onboarding, PO, Compliance Companion Infrastructure Management â to be checked with IT
+for NDA, pilot agreement or SoW, vendor onboarding and PO release â Infrastructure setup for the pilot
+Typical Startup (vendor) engagement process *These are tentative cost, for VMs this is the maximum budget that would be required, while for LLM Access points, the number corresponds to 41 API request made across the 3 projects which might increase based on usage
+** SDLC AI solution- HCL â ContextIQ to be replaced w Discussion, coordination, feedback, reports, comparison, studies
+Coordinating Pilot Agreement, Vendor Onboarding, Co TEXT_HEAD_END ARTIFACTS=live-confirm-3.pdf|/artifacts/c342731f-364a-44cf-a18c-960fe36c3fad

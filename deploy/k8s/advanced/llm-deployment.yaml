@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm
+  namespace: doc-optimizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm
+  template:
+    metadata:
+      labels:
+        app: llm
+    spec:
+      containers:
+      - name: llm
+        image: ollama/ollama:0.4.7
+        ports:
+        - containerPort: 11434
+        resources:
+          requests:
+            cpu: "2"
+            memory: "8Gi"
+          limits:
+            cpu: "8"
+            memory: "24Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm
+  namespace: doc-optimizer
+spec:
+  selector:
+    app: llm
+  ports:
+  - port: 11434
+    targetPort: 11434

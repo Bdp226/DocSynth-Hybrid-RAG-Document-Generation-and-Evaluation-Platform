@@ -1,0 +1,39 @@
+# Environments & Virtual Envs
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build & Generated Artifacts
+build/
+dist/
+*.egg-info/
+services/orchestrator/build/
+*.pdf
+*.docx
+*.png
+*.jpg
+*.jpeg
+
+# Environment Secrets
+.env
+services/orchestrator/.env
+*.local
+
+# IDE & Editor
+.vscode/
+.idea/
+
+# Large binaries & data files
+*.pptx
+*.zip
+*.tar.gz

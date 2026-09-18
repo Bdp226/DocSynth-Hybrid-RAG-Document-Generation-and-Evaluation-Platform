@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: doc-optimizer
+data:
+  APP_ENV: "prod"
+  LOG_LEVEL: "INFO"
+  ENABLE_POLICY_GUARDS: "true"
+  MAX_INPUT_CHARS: "80000"
+  QDRANT_URL: "http://qdrant:6333"
+  LLM_BASE_URL: "http://llm:11434"
+  LLM_MODEL: "llama3.1:8b-instruct"
+  VISION_MODEL: "llama3.2-vision:11b"
+  ENFORCE_IDENTITY_HEADERS: "true"
+  ALLOWED_ROLES: "author,reviewer,admin"
+  ARTIFACT_STORAGE_DIR: "/tmp/doc_optimizer_artifacts"

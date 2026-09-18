@@ -1,0 +1,46 @@
+services:
+  orchestrator:
+    build:
+      context: ../services/orchestrator
+    env_file:
+      - ../.env.example
+    environment:
+      - APP_ENV=prod
+      - ENABLE_POLICY_GUARDS=true
+      - QDRANT_URL=http://qdrant:6333
+      - LLM_BASE_URL=http://llm:11434
+      - REDIS_URL=redis://redis:6379/0
+      - UVICORN_WORKERS=4
+      - ARTIFACT_STORAGE_DIR=/tmp/doc_optimizer_artifacts
+    ports:
+      - "8080:8080"
+    volumes:
+      - orchestrator_artifacts:/tmp/doc_optimizer_artifacts
+    depends_on:
+      - qdrant
+      - llm
+      - redis
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.2
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  llm:
+    image: ollama/ollama:0.4.7
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  redis:
+    image: redis:7.4.0
+    ports:
+      - "6379:6379"
+
+volumes:
+  qdrant_data:
+  ollama_data:
+  orchestrator_artifacts:

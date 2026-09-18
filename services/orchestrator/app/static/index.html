@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Doc Optimizer Control Center</title>
+  <link rel="stylesheet" href="/ui/styles.css" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+  <header class="hero">
+    <p class="eyebrow">Enterprise Agentic Platform</p>
+    <h1>Document Optimization and Authoring Control Center</h1>
+    <p class="subtitle">Prompt-driven optimization, policy-aware generation, and secure PDF or DOCX delivery.</p>
+  </header>
+
+  <main class="layout">
+    <section class="panel identity-panel">
+      <h2>Identity Context</h2>
+      <div class="row two-col">
+        <label>
+          User ID
+          <input id="userId" value="user-001" />
+        </label>
+        <label>
+          Role
+          <select id="userRole">
+            <option value="author">author</option>
+            <option value="reviewer">reviewer</option>
+            <option value="admin">admin</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Generate Final Document</h2>
+      <p class="subtitle">Fill only the required fields first. Advanced settings are optional.</p>
+
+      <form id="workForm">
+        <div class="row two-col">
+          <label>
+            Document ID
+            <input id="documentId" value="doc-001" required />
+          </label>
+          <label>
+            Output Format
+            <div class="inline-wrap">
+              <label class="inline"><input type="checkbox" id="fmtPdf" checked /> PDF</label>
+              <label class="inline"><input type="checkbox" id="fmtDocx" /> DOCX</label>
+            </div>
+          </label>
+        </div>
+
+        <label>
+          Prompt (Required)
+          <textarea id="userPrompt" rows="3" placeholder="Describe the document you want to generate or optimize."></textarea>
+        </label>
+
+        <label>
+          Source Text (Optional)
+          <textarea id="sourceText" rows="10" placeholder="Paste source content here for optimization or grounding."></textarea>
+        </label>
+
+        <label id="imageGroup">
+          Image Inputs (optional, multiple)
+          <input id="imageFiles" type="file" accept="image/*" multiple />
+          <small id="imageSelection">No images selected.</small>
+        </label>
+
+        <label id="instructionsGroup">
+          Instructions (Optional, one per line)
+          <textarea id="instructions" rows="4" placeholder="Use short headers&#10;Add key risks and mitigations&#10;Keep under 500 words"></textarea>
+        </label>
+
+        <fieldset id="workspaceGroup">
+          <legend>Workspace Grounding</legend>
+          <label class="inline"><input type="checkbox" id="useWorkspaceContext" checked /> Use workspace documents</label>
+          <label>
+            File hints (comma-separated names, e.g. Sandbox environment.pptx)
+            <input id="workspaceHints" placeholder="SHIFT_Sandbox_Documentation_Slides_81-141 (1).pdf, Sandbox environment.pptx" />
+          </label>
+        </fieldset>
+
+        <details class="advanced-box">
+          <summary>Advanced Settings (Optional)</summary>
+          <div class="row two-col">
+            <label>
+              Domain
+              <input id="domain" value="general" />
+            </label>
+            <label>
+              Objective
+              <input id="objective" value="Improve clarity, structure, and executive readability" />
+            </label>
+          </div>
+          <label>
+            Detail Level
+            <select id="detailLevel">
+              <option value="full_deck" selected>full_deck (every slide + inline images)</option>
+              <option value="dossier">dossier</option>
+              <option value="comprehensive">comprehensive</option>
+              <option value="standard">standard</option>
+              <option value="summary">summary</option>
+            </select>
+          </label>
+          <label class="inline"><input type="checkbox" id="inlineArtifacts" /> Include inline Base64</label>
+        </details>
+
+        <div class="actions">
+          <button id="submitBtn" type="submit">Generate Document</button>
+          <button id="healthBtn" type="button" class="ghost">Check Health</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Benchmark Dashboard</h2>
+        <button id="refreshBenchBtn" type="button" class="ghost">Refresh</button>
+      </div>
+      <div id="benchStatus" class="mini-note">Waiting for benchmark data.</div>
+      <div id="benchCards" class="metric-grid"></div>
+      <div class="row two-col dashboard-grid">
+        <div>
+          <h3>Benchmark Summary</h3>
+          <pre id="benchSummary" class="output compact"></pre>
+        </div>
+        <div>
+          <h3>Current Request Analysis</h3>
+          <pre id="requestAnalysis" class="output compact"></pre>
+        </div>
+      </div>
+      <div>
+        <h3>Top Retrieved Chunks</h3>
+        <div id="retrievalList" class="artifact-list"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Run Output</h2>
+      <div id="status" class="status idle">Idle</div>
+      <pre id="optimizedText" class="output" aria-live="polite"></pre>
+      <div id="flags" class="chips"></div>
+      <div id="artifacts" class="artifact-list"></div>
+      <pre id="rawJson" class="output raw"></pre>
+    </section>
+  </main>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

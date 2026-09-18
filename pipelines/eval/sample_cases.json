@@ -1,0 +1,16 @@
+[
+  {
+    "case_id": "case-1",
+    "prompt": "Create a short executive summary",
+    "source_text": "The project completed phase one with minor schedule variance.",
+    "instructions": ["Use headings", "Include risks and mitigations"],
+    "must_include": ["Risk", "Mitigation"]
+  },
+  {
+    "case_id": "case-2",
+    "prompt": "Draft a concise status report",
+    "source_text": "Team resolved 8 defects and deferred 2 low-severity issues.",
+    "instructions": ["Keep under 120 words", "Use bullet points"],
+    "must_include": ["defects", "issues"]
+  }
+]

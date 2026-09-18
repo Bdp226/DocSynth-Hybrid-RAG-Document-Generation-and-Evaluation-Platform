@@ -1,0 +1,18 @@
+﻿FLAGS=pii_detected:phone,llm_fallback_used:compose SOURCES=SHIFT_Sandbox_Documentation_Slides_81-141 (1).pdf, Sandbox environment.pptx IMAGE_SNIPPETS=12 RETRIEVAL_MODE=dossier TEXT_CHARS=19378 TEXT_HEAD_START # Give Me Comprehensive Dcoumentation Along With Images Included
+
+## Objective
+Give me comprehensive dcoumentation along with images included
+
+## Executive Overview
+
+1 Restricted â Siemens Healthineers, 2026 (Source: "Sandbox environment.pdf", slides 81 -141)
+This document reproduces, in original order, every slide from the "Documentations and steps to follow" section of the source presentation (source slide numbers 81 -141).
+full-resolution screenshot together with its on -slide text, transcribed verbatim with its original bullet/paragraph structure preserved.
+No procedure, field, or step has been added, inferred, or Section Source Slide(s) PDF Page(s)
+Documentations and steps to follow 81â82 66â67 CMDB Application Registration & Compliance Companion 83â106 68â91
+
+Explain the business context, intended outcomes, scope, and why the sandbox initiative exists.
+
+32 USD is with markup, reduce the margins from effort Effort estimation for SDLC AI solution- HCL pilot/MVP
+HW and SW requirements for sandbox setup from vendor Sandbox resource setup for the pilot
+ContextIQ : Directly signals the differentiator â it's smart because it knows your project Effort estimation for SDLC  TEXT_HEAD_END ARTIFACTS=live-images-1.pdf|/artifacts/530912c2-2daa-464f-b3db-dd12310c1f76
