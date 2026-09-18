@@ -1,0 +1,37 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: services/orchestrator
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install audit tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt pip-audit bandit
+
+      - name: Run dependency audit
+        run: pip-audit
+
+      - name: Run static security scan
+        run: bandit -q -r app
