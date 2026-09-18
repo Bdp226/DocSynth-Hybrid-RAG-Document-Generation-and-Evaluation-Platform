@@ -16,6 +16,7 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from .image_intelligence import assess_image
 from .models import ImageInput
+from .retrieval import BM25Index, reciprocal_rank_fusion
 from .telemetry import record_image_verdict
 
 
@@ -661,24 +662,6 @@ def _chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
     return chunks
 
 
-def _idf(chunks: list[str], token: str) -> float:
-    df = sum(1 for chunk in chunks if token in _tokenize(chunk))
-    return math.log((1 + len(chunks)) / (1 + df)) + 1.0
-
-
-def _lexical_score(query_tokens: set[str], chunk: str, all_chunks: list[str]) -> float:
-    if not query_tokens:
-        return 0.0
-    chunk_tokens = _tokenize(chunk)
-    if not chunk_tokens:
-        return 0.0
-    score = 0.0
-    for token in query_tokens:
-        if token in chunk_tokens:
-            score += _idf(all_chunks, token)
-    return score / max(len(chunk_tokens), 1)
-
-
 def _embedding_scores(query: str, chunks: list[str]) -> list[float]:
     model = _load_embedding_model()
     if model is None:
@@ -776,9 +759,16 @@ def build_workspace_context(
         )
 
     chunk_texts = [t for _, t in raw_chunks]
-    prompt_tokens = _tokenize(user_prompt)
-    lexical = [_lexical_score(prompt_tokens, chunk, chunk_texts) for chunk in chunk_texts]
+    bm25 = BM25Index.build(chunk_texts)
+    lexical = bm25.scores(user_prompt)
     embedding = _embedding_scores(user_prompt, chunk_texts) if use_embeddings else [0.0 for _ in chunk_texts]
+
+    # Rank fusion instead of a weighted sum: the two channels are on different
+    # scales, so only their orderings are comparable.
+    channels = [lexical]
+    if any(value > 0.0 for value in embedding):
+        channels.append(embedding)
+    fused = reciprocal_rank_fusion(channels)
 
     hints_lower = [h.lower() for h in hints if h.strip()]
     scored: list[RetrievedChunk] = []
@@ -787,8 +777,8 @@ def build_workspace_context(
         hint_bonus = 0.0
         for hint in hints_lower:
             if hint in source_name.lower():
-                hint_bonus += 0.15
-        hybrid = (0.65 * embedding[i]) + (0.35 * lexical[i]) + hint_bonus
+                hint_bonus += 0.05
+        hybrid = min(1.0, fused[i] + hint_bonus)
         scored.append(
             RetrievedChunk(
                 source=source_name,
