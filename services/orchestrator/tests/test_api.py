@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
+import asyncio
 import json
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -393,3 +395,215 @@ def test_compose_includes_workspace_ppt_images(tmp_path: Path, monkeypatch) -> N
 
     assert response.status_code == 400
     assert len(captured["image_inputs"]) == 1
+
+
+def test_parse_topic_narratives_accepts_loose_markers() -> None:
+    raw = (
+        "- [topic 0]:\n"
+        "This is a grounded narrative block that is comfortably longer than eighty characters so it is retained.\n\n"
+        "[TOPIC 1]\n"
+        "This is the second narrative block and it is also long enough to survive parsing and publication."
+    )
+
+    narratives = main._parse_topic_narratives(raw)
+
+    assert narratives[0].startswith("This is a grounded narrative")
+    assert narratives[1].startswith("This is the second narrative")
+
+
+def test_full_deck_retries_missing_topics(tmp_path: Path, monkeypatch) -> None:
+    settings.artifact_storage_dir = str(tmp_path)
+    calls: list[str] = []
+
+    async def fake_generate(prompt: str, model_override=None, images=None) -> str:
+        calls.append(prompt)
+        if "[TOPIC 0]" in prompt and "[TOPIC 1]" in prompt:
+            return (
+                "[TOPIC 0]\n"
+                "First topic narrative that is long enough to be retained and published as LLM-authored content."
+            )
+        if "[TOPIC 1]" in prompt:
+            return (
+                "[TOPIC 1]\n"
+                "Second topic narrative recovered by the repair pass and long enough to replace fallback prose."
+            )
+        return ""
+
+    slide_records = [
+        SimpleNamespace(title="Overview", lines=["A" * 120], tables=[], images=[]),
+        SimpleNamespace(title="Architecture", lines=["B" * 120], tables=[], images=[]),
+    ]
+
+    monkeypatch.setattr(main, "_generate_with_llm", fake_generate)
+
+    result = asyncio.run(
+        main._generate_full_deck_document(
+            SimpleNamespace(objective="doc", domain="general"),
+            slide_records,
+            ["deck.pptx"],
+            2,
+            2,
+        )
+    )
+
+    assert "First topic narrative" in result
+    assert "Second topic narrative recovered by the repair pass" in result
+    assert any("Do NOT omit any topic" in prompt for prompt in calls)
+
+
+def test_compose_async_job_returns_persisted_result(tmp_path: Path, monkeypatch) -> None:
+    settings.artifact_storage_dir = str(tmp_path)
+
+    async def fake_compose(req, ctx):
+        return main.ComposeResponse(
+            document_id=req.document_id,
+            optimized_text="Background result",
+            artifacts=[],
+            policy_flags=[],
+            model_used=settings.llm_model,
+            image_text_snippets=[],
+            workspace_sources=[],
+            retrieval_chunks=[],
+            retrieval_stats={"generation_mode": req.detail_level},
+        )
+
+    monkeypatch.setattr(main, "_compose_document", fake_compose)
+
+    response = client.post(
+        "/compose/jobs",
+        headers=_headers(user_id="job-owner", role="author"),
+        json={
+            "document_id": "job-1",
+            "user_prompt": "generate documentation",
+            "source_text": "source",
+            "instructions": [],
+            "objective": "formal documentation",
+            "domain": "general",
+            "detail_level": "standard",
+            "output_formats": ["pdf"],
+            "image_inputs": [],
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] in {"queued", "running", "completed"}
+
+    status = payload
+    for _ in range(20):
+        status = client.get(status["status_path"], headers=_headers(user_id="job-owner", role="author")).json()
+        if status["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    assert status["status"] == "completed"
+
+    result = client.get(status["result_path"], headers=_headers(user_id="job-owner", role="author"))
+    assert result.status_code == 200
+    assert result.json()["optimized_text"] == "Background result"
+
+
+def test_compose_async_job_enforces_owner(tmp_path: Path, monkeypatch) -> None:
+    settings.artifact_storage_dir = str(tmp_path)
+
+    async def fake_compose(req, ctx):
+        return main.ComposeResponse(
+            document_id=req.document_id,
+            optimized_text="Background result",
+            artifacts=[],
+            policy_flags=[],
+            model_used=settings.llm_model,
+            image_text_snippets=[],
+            workspace_sources=[],
+            retrieval_chunks=[],
+            retrieval_stats={},
+        )
+
+    monkeypatch.setattr(main, "_compose_document", fake_compose)
+
+    response = client.post(
+        "/compose/jobs",
+        headers=_headers(user_id="job-owner", role="author"),
+        json={
+            "document_id": "job-2",
+            "user_prompt": "generate documentation",
+            "source_text": "source",
+            "instructions": [],
+            "objective": "formal documentation",
+            "domain": "general",
+            "detail_level": "standard",
+            "output_formats": ["pdf"],
+            "image_inputs": [],
+        },
+    )
+
+    status_path = response.json()["status_path"]
+    forbidden = client.get(status_path, headers=_headers(user_id="other-user", role="author"))
+    assert forbidden.status_code == 403
+
+
+def test_generate_with_llm_uses_disk_cache(tmp_path: Path, monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"response": "Cached generation result"}
+
+    class FakeClient:
+        def __init__(self):
+            self.posts = 0
+
+        async def post(self, url, json):
+            self.posts += 1
+            return FakeResponse()
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(main, "llm_cache_dir", tmp_path / "llm_cache")
+    monkeypatch.setattr(main, "_model_availability_cache", {})
+    monkeypatch.setattr(main.app.state, "http_client", fake_client, raising=False)
+
+    first = asyncio.run(main._generate_with_llm("Prompt A"))
+    second = asyncio.run(main._generate_with_llm("Prompt A"))
+
+    assert first == "Cached generation result"
+    assert second == "Cached generation result"
+    assert fake_client.posts == 1
+
+
+def test_generate_with_llm_short_circuits_missing_vision_model(tmp_path: Path, monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"models": [{"name": settings.llm_model}]}
+
+    class FakeClient:
+        def __init__(self):
+            self.gets = 0
+            self.posts = 0
+
+        async def get(self, url):
+            self.gets += 1
+            return FakeResponse()
+
+        async def post(self, url, json):
+            self.posts += 1
+            return FakeResponse()
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(main, "llm_cache_dir", tmp_path / "llm_cache")
+    monkeypatch.setattr(main, "_model_availability_cache", {})
+    monkeypatch.setattr(main.app.state, "http_client", fake_client, raising=False)
+
+    try:
+        asyncio.run(main._generate_with_llm("Vision prompt", model_override=settings.vision_model, images=["abc"]))
+    except main.HTTPException as exc:
+        assert exc.status_code == 502
+        assert "unavailable" in str(exc.detail)
+    else:
+        raise AssertionError("Expected missing vision model to raise HTTPException")
+
+    assert fake_client.gets == 1
+    assert fake_client.posts == 0

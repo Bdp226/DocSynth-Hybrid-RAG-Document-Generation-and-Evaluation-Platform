@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import re
@@ -43,6 +44,8 @@ from .workspace_context import (
 
 
 logger = logging.getLogger("doc_optimizer.api")
+job_state_dir = Path(__file__).resolve().parent.parent / "build" / "jobs"
+llm_cache_dir = Path(__file__).resolve().parent.parent / "build" / "llm_cache"
 
 # Observability sink for service-level KPIs. Recording is best-effort and never
 # participates in request success or failure. The log lives under build/ so it is
@@ -50,6 +53,8 @@ logger = logging.getLogger("doc_optimizer.api")
 metrics_registry = MetricsRegistry(
     log_path=Path(__file__).resolve().parent.parent / "build" / "docsynth_metrics.jsonl"
 )
+_compose_jobs: dict[str, dict[str, object]] = {}
+_model_availability_cache: dict[str, tuple[bool, float]] = {}
 
 
 @asynccontextmanager
@@ -118,6 +123,126 @@ def _merge_image_inputs(primary: list[ImageInput], secondary: list[ImageInput], 
             break
 
     return merged
+
+
+def _generation_cache_path(cache_key: str) -> Path:
+    return llm_cache_dir / f"{cache_key}.json"
+
+
+def _cache_key_for_request(model_name: str, prompt: str, images: list[str] | None = None) -> str:
+    digest = hashlib.sha256()
+    digest.update(model_name.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(prompt.encode("utf-8"))
+    for image in images or []:
+        digest.update(b"\x00")
+        digest.update(hashlib.sha256(image.encode("utf-8")).digest())
+    return digest.hexdigest()
+
+
+def _read_generation_cache(cache_key: str) -> str | None:
+    if not settings.llm_cache_enabled:
+        return None
+    path = _generation_cache_path(cache_key)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    response = payload.get("response")
+    if isinstance(response, str) and response.strip():
+        return response.strip()
+    return None
+
+
+def _write_generation_cache(cache_key: str, *, model_name: str, prompt: str, response: str, image_count: int) -> None:
+    if not settings.llm_cache_enabled:
+        return
+    try:
+        llm_cache_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "model": model_name,
+            "prompt_chars": len(prompt),
+            "image_count": image_count,
+            "response": response,
+            "created_at": time.time(),
+        }
+        _generation_cache_path(cache_key).write_text(json.dumps(payload), encoding="utf-8")
+        cached_files = sorted(llm_cache_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        for stale in cached_files[settings.llm_cache_max_entries :]:
+            stale.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+async def _model_available(model_name: str) -> bool:
+    cached = _model_availability_cache.get(model_name)
+    now = time.time()
+    if cached and (now - cached[1]) <= settings.llm_capability_ttl_seconds:
+        return cached[0]
+
+    available = False
+    try:
+        response = await app.state.http_client.get(f"{settings.llm_base_url}/api/tags")
+        response.raise_for_status()
+        data = response.json()
+        names = {
+            item.get("name", "")
+            for item in data.get("models", [])
+            if isinstance(item, dict)
+        }
+        available = model_name in names
+    except Exception:
+        available = False
+
+    _model_availability_cache[model_name] = (available, now)
+    return available
+
+
+def _job_snapshot_path(job_id: str) -> Path:
+    return job_state_dir / f"{job_id}.json"
+
+
+def _persist_job_snapshot(job: dict[str, object]) -> None:
+    job_state_dir.mkdir(parents=True, exist_ok=True)
+    serializable = {key: value for key, value in job.items() if key != "task"}
+    _job_snapshot_path(str(job["job_id"])).write_text(json.dumps(serializable), encoding="utf-8")
+
+
+def _load_job_snapshot(job_id: str) -> dict[str, object] | None:
+    in_memory = _compose_jobs.get(job_id)
+    if in_memory is not None:
+        return in_memory
+
+    path = _job_snapshot_path(job_id)
+    if not path.exists():
+        return None
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("status") in {"queued", "running"}:
+        payload["status"] = "interrupted"
+        payload["error"] = "The server restarted before the background job completed. Resubmit the request to continue."
+        payload["updated_at"] = time.time()
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
+def _require_job_owner(job: dict[str, object], user_id: str) -> None:
+    if job.get("owner_user_id") != user_id:
+        raise HTTPException(status_code=403, detail="This job belongs to a different user")
+
+
+def _public_job_view(job: dict[str, object]) -> dict[str, object]:
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "created_at": job["created_at"],
+        "updated_at": job["updated_at"],
+        "error": job.get("error"),
+        "result_path": f"/compose/jobs/{job['job_id']}/result",
+        "status_path": f"/compose/jobs/{job['job_id']}",
+    }
 
 
 def _fallback_compose_text(
@@ -576,6 +701,69 @@ def _batch_items(items, batch_size: int):
     return [items[index:index + batch_size] for index in range(0, len(items), batch_size) if items[index:index + batch_size]]
 
 
+def _topic_prompt_payload(index: int, unit: object) -> str:
+    body = "\n".join(f"- {line}" for line in unit.lines[:22])
+    if not body:
+        body = "- (This topic is conveyed through diagrams or tables rather than body text.)"
+    extras = []
+    if unit.tables:
+        extras.append(f"{len(unit.tables)} table(s) will be shown with your text")
+    if unit.images:
+        extras.append(f"{len(unit.images)} figure(s) will be shown with your text")
+    extra_note = ("; ".join(extras) + ".") if extras else "No figures or tables accompany this topic."
+    return f"[TOPIC {index}] Subject: {unit.title}\n{extra_note}\nCaptured content:\n{body}"
+
+
+async def _render_topic_batches(
+    req: ComposeRequest,
+    indexed_units: list[tuple[int, object]],
+    *,
+    batch_size: int,
+    max_concurrency: int,
+    repair_mode: bool = False,
+) -> dict[int, str]:
+    batches = _batch_items(indexed_units, batch_size)
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def render_batch(batch) -> str:
+        payloads = [_topic_prompt_payload(index, unit) for index, unit in batch]
+        rules = (
+            "Hard rules:\n"
+            "- Begin each topic's block with the exact marker [TOPIC <number>] on its own line.\n"
+            "- Do NOT write markdown headings, bullet lists, or tables; return prose paragraphs only.\n"
+            "- Never refer to slides, slide numbers, decks, or presentations. Write as standalone documentation.\n"
+            "- Explain what the topic establishes, why it matters, and how it fits the wider process.\n"
+            "- Use ONLY the captured content provided. Never invent facts, dates, figures, names, or outcomes.\n"
+            "- Never mention meetings, attendees, personal names, speakers, or who said what.\n"
+            "- Use formal third-person documentation tone with no conversational phrasing.\n"
+        )
+        if repair_mode:
+            rules += (
+                "- Do NOT omit any topic. If the source is sparse, still write 120 to 220 words grounded in the available evidence.\n"
+                "- Repeat the marker exactly as given before every topic body.\n"
+            )
+        prompt = (
+            "You are writing a formal enterprise reference manual in the style of a textbook chapter. "
+            "For EACH topic provided, write 180 to 300 words of flowing explanatory prose.\n\n"
+            f"{rules}\n"
+            f"Document objective: {req.objective}\n"
+            f"Domain: {req.domain}\n\n"
+            "Topics to document:\n\n" + "\n\n".join(payloads)
+        )
+
+        try:
+            async with semaphore:
+                return await _generate_with_llm(prompt)
+        except HTTPException:
+            return ""
+
+    responses = await asyncio.gather(*(render_batch(batch) for batch in batches))
+    narratives: dict[int, str] = {}
+    for response in responses:
+        narratives.update(_parse_topic_narratives(response))
+    return narratives
+
+
 def _source_evidence_appendix(retrieved_chunks, source_limit: int = 6, chunk_limit_per_source: int = 5) -> str:
     grouped: dict[str, list] = {}
     for item in retrieved_chunks:
@@ -907,16 +1095,18 @@ def _parse_topic_narratives(raw: str) -> dict[int, str]:
         return {}
 
     narratives: dict[int, str] = {}
-    parts = re.split(r"\[TOPIC\s+(\d+)\]", raw)
-    for index in range(1, len(parts) - 1, 2):
+    markers = list(re.finditer(r"(?im)^\s*(?:[-*]\s*)?\[\s*topic\s+(\d+)\s*\]\s*:?[ \t]*$", raw))
+    for index, match in enumerate(markers):
         try:
-            topic_number = int(parts[index])
+            topic_number = int(match.group(1))
         except ValueError:
             continue
-        body = parts[index + 1].strip()
+        start = match.end()
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(raw)
+        body = raw[start:end].strip()
         body = re.sub(r"^#{1,6}\s.*$", "", body, flags=re.MULTILINE).strip()
         body = re.sub(r"\n{3,}", "\n\n", body)
-        if len(body) >= 140:
+        if len(body) >= 80:
             narratives[topic_number] = body
     return narratives
 
@@ -1069,52 +1259,25 @@ async def _generate_full_deck_document(
 
     indexed_units = list(enumerate(units))
     unit_index = {id(unit): index for index, unit in indexed_units}
-    batches = _batch_items(indexed_units, batch_size)
-    semaphore = asyncio.Semaphore(max_concurrency)
+    narratives = await _render_topic_batches(
+        req,
+        indexed_units,
+        batch_size=batch_size,
+        max_concurrency=max_concurrency,
+    )
 
-    async def render_batch(batch) -> str:
-        payloads: list[str] = []
-        for index, unit in batch:
-            body = "\n".join(f"- {line}" for line in unit.lines[:22])
-            if not body:
-                body = "- (This topic is conveyed through diagrams or tables rather than body text.)"
-            extras = []
-            if unit.tables:
-                extras.append(f"{len(unit.tables)} table(s) will be shown with your text")
-            if unit.images:
-                extras.append(f"{len(unit.images)} figure(s) will be shown with your text")
-            extra_note = ("; ".join(extras) + ".") if extras else "No figures or tables accompany this topic."
-            payloads.append(
-                f"[TOPIC {index}] Subject: {unit.title}\n{extra_note}\nCaptured content:\n{body}"
+    missing = [(index, unit) for index, unit in indexed_units if index not in narratives]
+    if missing:
+        repair_batch_size = 1 if len(missing) <= 6 else 2
+        narratives.update(
+            await _render_topic_batches(
+                req,
+                missing,
+                batch_size=repair_batch_size,
+                max_concurrency=max_concurrency,
+                repair_mode=True,
             )
-
-        prompt = (
-            "You are writing a formal enterprise reference manual in the style of a textbook chapter. "
-            "For EACH topic provided, write 180 to 300 words of flowing explanatory prose.\n\n"
-            "Hard rules:\n"
-            "- Begin each topic's block with the exact marker [TOPIC <number>] on its own line.\n"
-            "- Do NOT write markdown headings, bullet lists, or tables; return prose paragraphs only.\n"
-            "- Never refer to slides, slide numbers, decks, or presentations. Write as standalone documentation.\n"
-            "- Explain what the topic establishes, why it matters, and how it fits the wider process.\n"
-            "- Use ONLY the captured content provided. Never invent facts, dates, figures, names, or outcomes.\n"
-            "- Never mention meetings, attendees, personal names, speakers, or who said what.\n"
-            "- Use formal third-person documentation tone with no conversational phrasing.\n\n"
-            f"Document objective: {req.objective}\n"
-            f"Domain: {req.domain}\n\n"
-            "Topics to document:\n\n" + "\n\n".join(payloads)
         )
-
-        try:
-            async with semaphore:
-                return await _generate_with_llm(prompt)
-        except HTTPException:
-            return ""
-
-    responses = await asyncio.gather(*(render_batch(batch) for batch in batches))
-
-    narratives: dict[int, str] = {}
-    for response in responses:
-        narratives.update(_parse_topic_narratives(response))
 
     total_figures = sum(len(unit.images) for unit in units)
     total_tables = sum(len(unit.tables) for unit in units)
@@ -1233,8 +1396,17 @@ def _load_benchmark_snapshot() -> dict[str, object]:
 
 
 async def _generate_with_llm(prompt: str, model_override: str | None = None, images: list[str] | None = None) -> str:
+    model_name = model_override or settings.llm_model
+    cache_key = _cache_key_for_request(model_name, prompt, images)
+    cached = _read_generation_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    if model_override == settings.vision_model and not await _model_available(model_name):
+        raise HTTPException(status_code=502, detail=f"LLM model unavailable: {model_name}")
+
     payload = {
-        "model": model_override or settings.llm_model,
+        "model": model_name,
         "prompt": prompt,
         "stream": False,
     }
@@ -1251,6 +1423,13 @@ async def _generate_with_llm(prompt: str, model_override: str | None = None, ima
     optimized = data.get("response", "").strip()
     if not optimized:
         raise HTTPException(status_code=502, detail="LLM returned empty response")
+    _write_generation_cache(
+        cache_key,
+        model_name=model_name,
+        prompt=prompt,
+        response=optimized,
+        image_count=len(images or []),
+    )
     return optimized
 
 
@@ -1279,7 +1458,8 @@ async def _extract_text_from_images(image_inputs: list[ImageInput]) -> list[str]
             )
         except HTTPException as exc:
             if exc.status_code == 502:
-                extracted = "Vision model unavailable. OCR extraction skipped for this image."
+                logger.info("vision_model_unavailable image=%s model=%s", image.image_name, settings.vision_model)
+                continue
             else:
                 raise
         if not extracted.strip():
@@ -1344,8 +1524,7 @@ async def optimize(req: OptimizeRequest, ctx: RequestContext = Depends(get_reque
     )
 
 
-@app.post("/compose", response_model=ComposeResponse)
-async def compose(req: ComposeRequest, ctx: RequestContext = Depends(get_request_context)) -> ComposeResponse:
+async def _compose_document(req: ComposeRequest, ctx: RequestContext) -> ComposeResponse:
     stopwatch = Stopwatch()
     triage_before = image_triage.totals()
     profile = _generation_profile(req)
@@ -1559,6 +1738,75 @@ async def compose(req: ComposeRequest, ctx: RequestContext = Depends(get_request
         ],
         retrieval_stats=retrieval_stats,
     )
+
+
+@app.post("/compose", response_model=ComposeResponse)
+async def compose(req: ComposeRequest, ctx: RequestContext = Depends(get_request_context)) -> ComposeResponse:
+    return await _compose_document(req, ctx)
+
+
+async def _run_compose_job(job_id: str, req: ComposeRequest, ctx: RequestContext) -> None:
+    job = _compose_jobs[job_id]
+    job["status"] = "running"
+    job["updated_at"] = time.time()
+    _persist_job_snapshot(job)
+
+    try:
+        result = await _compose_document(req, ctx)
+        job["status"] = "completed"
+        job["result"] = result.model_dump(mode="json")
+        job["error"] = None
+    except HTTPException as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc.detail)
+    except Exception as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)
+    finally:
+        job["updated_at"] = time.time()
+        job.pop("task", None)
+        _persist_job_snapshot(job)
+
+
+@app.post("/compose/jobs", status_code=202)
+async def compose_async(req: ComposeRequest, ctx: RequestContext = Depends(get_request_context)) -> dict[str, object]:
+    job_id = str(uuid4())
+    created_at = time.time()
+    job = {
+        "job_id": job_id,
+        "owner_user_id": ctx.user_id,
+        "owner_user_role": ctx.user_role,
+        "status": "queued",
+        "created_at": created_at,
+        "updated_at": created_at,
+        "request": req.model_dump(mode="json"),
+        "result": None,
+        "error": None,
+    }
+    _compose_jobs[job_id] = job
+    _persist_job_snapshot(job)
+    job["task"] = asyncio.create_task(_run_compose_job(job_id, req, ctx))
+    return _public_job_view(job)
+
+
+@app.get("/compose/jobs/{job_id}")
+async def compose_job_status(job_id: str, ctx: RequestContext = Depends(get_request_context)) -> dict[str, object]:
+    job = _load_job_snapshot(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Compose job not found")
+    _require_job_owner(job, ctx.user_id)
+    return _public_job_view(job)
+
+
+@app.get("/compose/jobs/{job_id}/result", response_model=ComposeResponse)
+async def compose_job_result(job_id: str, ctx: RequestContext = Depends(get_request_context)) -> ComposeResponse:
+    job = _load_job_snapshot(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Compose job not found")
+    _require_job_owner(job, ctx.user_id)
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=409, detail={"status": job.get("status"), "error": job.get("error")})
+    return ComposeResponse.model_validate(job.get("result") or {})
 
 
 def _record_compose_metrics(

@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     llm_model: str = "llama3.1:8b-instruct"
     vision_model: str = "llama3.2-vision:11b"
     llm_timeout_seconds: int = 60
+    llm_cache_enabled: bool = True
+    llm_cache_max_entries: int = 1000
+    llm_capability_ttl_seconds: int = 300
 
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
 
