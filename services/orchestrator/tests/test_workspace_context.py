@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
+from PIL import Image, ImageDraw
 from pptx import Presentation
 from pptx.util import Inches
 
@@ -115,16 +116,25 @@ def test_build_workspace_context_diversifies_redundant_chunks(tmp_path: Path) ->
 
 
 def test_extract_workspace_images_from_pptx(tmp_path: Path) -> None:
-    image_bytes = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9VE3d2wAAAAASUVORK5CYII="
-    )
+    # A realistic slide graphic: content triage deliberately discards 1x1 pixel
+    # spacers, icons and other non-informative assets, so the fixture has to be a
+    # diagram the pipeline would actually publish.
+    canvas = Image.new("RGB", (600, 400), (255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+    for x in range(0, 600, 50):
+        draw.line([(x, 0), (x, 400)], fill=(20, 40, 90), width=2)
+    for y in range(0, 400, 50):
+        draw.line([(0, y), (600, y)], fill=(200, 60, 30), width=2)
+    for x in range(0, 600, 100):
+        draw.rectangle([x + 2, 2, x + 48, 398], outline=(0, 0, 0), width=1)
+
     image_path = tmp_path / "slide.png"
-    image_path.write_bytes(image_bytes)
+    canvas.save(image_path, format="PNG")
 
     prs = Presentation()
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     slide.shapes.add_textbox(Inches(1), Inches(0.5), Inches(6), Inches(0.6)).text_frame.text = "Sandbox architecture"
-    slide.shapes.add_picture(str(image_path), Inches(1), Inches(1.2), width=Inches(1), height=Inches(1))
+    slide.shapes.add_picture(str(image_path), Inches(1), Inches(1.2), width=Inches(3), height=Inches(2))
     deck_path = tmp_path / "deck.pptx"
     prs.save(str(deck_path))
 

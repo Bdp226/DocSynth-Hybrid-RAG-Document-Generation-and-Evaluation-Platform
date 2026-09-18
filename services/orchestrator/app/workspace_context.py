@@ -14,7 +14,9 @@ from pypdf import PdfReader
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
+from .image_intelligence import assess_image
 from .models import ImageInput
+from .telemetry import record_image_verdict
 
 
 SUPPORTED_SUFFIXES = {".md", ".txt", ".docx", ".pdf", ".pptx"}
@@ -369,6 +371,13 @@ def _slide_images(
         if digest in seen_hashes:
             continue
         seen_hashes.add(digest)
+
+        # Content-aware triage: decorative clip-art, icons and personal photos are
+        # withheld so only documentary visuals reach the published artefact.
+        verdict = assess_image(blob)
+        record_image_verdict(verdict)
+        if not verdict.include:
+            continue
 
         figure_index += 1
         images.append(

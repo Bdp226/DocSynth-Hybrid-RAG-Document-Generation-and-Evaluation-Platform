@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.responses import FileResponse
+from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 
@@ -24,6 +25,15 @@ from .document_builder import generate_artifacts
 from .models import ComposeRequest, ComposeResponse, ImageInput, OptimizeRequest, OptimizeResponse
 from .policy import detect_policy_flags, enforce_input_limits
 from .security import RequestContext, get_request_context
+from .telemetry import (
+    MetricsRegistry,
+    RunMetrics,
+    Stopwatch,
+    analyze_document,
+    estimate_llm_authorship,
+    image_triage,
+    triage_delta,
+)
 from .workspace_context import (
     build_workspace_context,
     extract_pptx_slide_records,
@@ -33,6 +43,13 @@ from .workspace_context import (
 
 
 logger = logging.getLogger("doc_optimizer.api")
+
+# Observability sink for service-level KPIs. Recording is best-effort and never
+# participates in request success or failure. The log lives under build/ so it is
+# git-ignored and outside the retriever's workspace scope.
+metrics_registry = MetricsRegistry(
+    log_path=Path(__file__).resolve().parent.parent / "build" / "docsynth_metrics.jsonl"
+)
 
 
 @asynccontextmanager
@@ -1329,6 +1346,8 @@ async def optimize(req: OptimizeRequest, ctx: RequestContext = Depends(get_reque
 
 @app.post("/compose", response_model=ComposeResponse)
 async def compose(req: ComposeRequest, ctx: RequestContext = Depends(get_request_context)) -> ComposeResponse:
+    stopwatch = Stopwatch()
+    triage_before = image_triage.totals()
     profile = _generation_profile(req)
     raw_source = req.source_text.strip()
     workspace_context = ""
@@ -1393,6 +1412,7 @@ async def compose(req: ComposeRequest, ctx: RequestContext = Depends(get_request
 
     effective_prompt, effective_objective, effective_instructions = _professional_authoring_brief(req, workspace_sources)
     instructions_text = "\n".join(f"- {item}" for item in effective_instructions if item.strip())
+    extraction_latency_ms = stopwatch.lap_ms()
 
     seed_text = raw_source if raw_source else effective_prompt
     if image_context:
@@ -1485,10 +1505,11 @@ async def compose(req: ComposeRequest, ctx: RequestContext = Depends(get_request
             policy_flags.append("llm_fallback_used:compose")
         else:
             raise
+    generation_latency_ms = stopwatch.lap_ms()
     rendered = generate_artifacts(req.document_id, optimized, req.output_formats, image_inputs=all_image_inputs)
     if not rendered:
         raise HTTPException(status_code=400, detail="No valid output formats requested. Use pdf and/or docx.")
-
+    render_latency_ms = stopwatch.lap_ms()
     artifacts = [
         save_artifact(
             owner_user_id=ctx.user_id,
@@ -1501,6 +1522,23 @@ async def compose(req: ComposeRequest, ctx: RequestContext = Depends(get_request
         )
         for item in rendered
     ]
+
+    _record_compose_metrics(
+        req=req,
+        profile=profile,
+        optimized=optimized,
+        slide_records=slide_records,
+        all_image_inputs=all_image_inputs,
+        workspace_sources=workspace_sources,
+        retrieval_stats=retrieval_stats,
+        policy_flags=policy_flags,
+        rendered=rendered,
+        stopwatch=stopwatch,
+        triage_before=triage_before,
+        extraction_latency_ms=extraction_latency_ms,
+        generation_latency_ms=generation_latency_ms,
+        render_latency_ms=render_latency_ms,
+    )
 
     return ComposeResponse(
         document_id=req.document_id,
@@ -1521,6 +1559,89 @@ async def compose(req: ComposeRequest, ctx: RequestContext = Depends(get_request
         ],
         retrieval_stats=retrieval_stats,
     )
+
+
+def _record_compose_metrics(
+    *,
+    req: ComposeRequest,
+    profile: dict,
+    optimized: str,
+    slide_records: list,
+    all_image_inputs: list,
+    workspace_sources: list[str],
+    retrieval_stats: dict,
+    policy_flags: list[str],
+    rendered: list,
+    stopwatch: Stopwatch,
+    triage_before: dict,
+    extraction_latency_ms: float,
+    generation_latency_ms: float,
+    render_latency_ms: float,
+) -> None:
+    """Capture service-level KPIs for a completed run. Never raises."""
+    try:
+        structure = analyze_document(optimized)
+        total_ms = stopwatch.total_ms()
+        seconds = max(total_ms / 1000.0, 1e-6)
+        figures_extracted = len(all_image_inputs)
+        topics = int(structure["topics"])
+        llm_topics, llm_coverage = estimate_llm_authorship(optimized, topics)
+
+        breakdown = triage_delta(triage_before, image_triage.totals())
+        suppressed = sum(count for key, count in breakdown.items() if key.startswith("dropped:"))
+        kept = sum(count for key, count in breakdown.items() if key.startswith("kept:"))
+        # Share of candidate assets that were judged worth publishing.
+        visual_precision = round(kept / (kept + suppressed), 4) if (kept + suppressed) else 0.0
+
+        metrics_registry.record(
+            RunMetrics(
+                document_id=req.document_id,
+                generation_mode=str(profile.get("mode", req.detail_level)),
+                succeeded=True,
+                total_latency_ms=total_ms,
+                extraction_latency_ms=extraction_latency_ms,
+                generation_latency_ms=generation_latency_ms,
+                render_latency_ms=render_latency_ms,
+                slides_ingested=len(slide_records),
+                slides_per_second=round(len(slide_records) / seconds, 3),
+                output_chars=int(structure["output_chars"]),
+                chars_per_second=round(int(structure["output_chars"]) / seconds, 2),
+                parts=int(structure["parts"]),
+                topics=topics,
+                procedure_steps=int(structure["procedure_steps"]),
+                tables_rendered=int(structure["tables_rendered"]),
+                table_rows=int(structure["table_rows"]),
+                figures_extracted=figures_extracted,
+                figures_embedded=int(structure["figures_embedded"]),
+                figure_retention_rate=(
+                    round(int(structure["figures_embedded"]) / figures_extracted, 4)
+                    if figures_extracted
+                    else 0.0
+                ),
+                figures_suppressed=suppressed,
+                triage_breakdown=breakdown,
+                visual_precision_rate=visual_precision,
+                llm_topics=llm_topics,
+                llm_coverage_rate=llm_coverage,
+                used_fallback=any("llm_fallback_used" in flag for flag in policy_flags),
+                retrieval_top_score=float(retrieval_stats.get("top_score", 0.0) or 0.0),
+                retrieval_latency_ms=float(retrieval_stats.get("retrieval_latency_ms", 0.0) or 0.0),
+                grounding_sources=len(workspace_sources),
+                leak_counts=dict(structure["leak_counts"]),
+                content_integrity_pass=bool(structure["content_integrity_pass"]),
+                artifact_bytes=sum(len(item.content) for item in rendered),
+            )
+        )
+    except Exception:  # pragma: no cover - telemetry must not affect the request
+        logger.debug("metrics capture skipped", exc_info=True)
+
+
+@app.get("/metrics")
+async def metrics(format: str = "json"):
+    """Expose aggregated service-level KPIs for dashboards and scrapers."""
+    if format.lower() == "prometheus":
+        return PlainTextResponse(metrics_registry.prometheus())
+    return metrics_registry.snapshot()
 
 
 @app.get("/artifacts/{artifact_id}")

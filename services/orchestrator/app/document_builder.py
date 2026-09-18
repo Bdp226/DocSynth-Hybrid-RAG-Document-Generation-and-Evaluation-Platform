@@ -26,6 +26,14 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from .image_intelligence import (
+    DOCX_MAX_WIDTH_IN,
+    PDF_MAX_HEIGHT_PT,
+    PDF_MAX_WIDTH_PT,
+    display_size_inches,
+    display_size_pt,
+    image_dimensions,
+)
 from .models import ImageInput
 
 
@@ -53,10 +61,49 @@ _INLINE_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)([^*]+?)(?<!\*)\*(?!\*)")
 _IMAGE_TOKEN_RE = re.compile(r"^\[\[IMAGE:(.+?)\]\]$")
 
 
+_MAX_CAPTION_CHARS = 72
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s")
+
+
+def _caption_subject(section_title: str) -> str:
+    """Reduce a section heading to a short caption subject.
+
+    Narrative text must never be used verbatim as a caption, so the first
+    sentence is taken and then hard-truncated on a word boundary.
+    """
+    subject = " ".join(section_title.split()).strip().rstrip(":").strip()
+    if not subject:
+        return ""
+    subject = _SENTENCE_SPLIT_RE.split(subject)[0].strip().rstrip(".").strip()
+    if len(subject) <= _MAX_CAPTION_CHARS:
+        return subject
+    clipped = subject[:_MAX_CAPTION_CHARS].rsplit(" ", 1)[0].rstrip(",;:-")
+    return f"{clipped}..."
+
+
+def _looks_like_heading(line: str) -> bool:
+    """Guard the colon-terminated heading heuristic against ordinary prose.
+
+    A trailing colon alone is not sufficient: body sentences frequently end that
+    way, and treating them as headings previously leaked whole paragraphs into
+    figure captions.
+    """
+    if not line.endswith(":"):
+        return False
+    stripped = line.rstrip(":").strip()
+    if not stripped or len(stripped) > 80:
+        return False
+    if len(stripped.split()) > 12:
+        return False
+    # Internal sentence punctuation means this is prose, not a label.
+    return not re.search(r"[.!?](\s|$)", stripped)
+
+
 def _figure_caption(index: int, section_title: str = "") -> str:
     """Build a textbook-style caption that never exposes source slide numbering."""
-    if section_title:
-        return f"Figure {index} — {section_title}"
+    subject = _caption_subject(section_title)
+    if subject:
+        return f"Figure {index} — {subject}"
     return f"Figure {index}"
 
 
@@ -117,6 +164,40 @@ def _normalize_base64_image(content: str) -> bytes | None:
         return base64.b64decode(normalized, validate=True)
     except (binascii.Error, ValueError):
         return None
+
+
+def _pdf_image_flowable(image_bytes: bytes, *, width: float = PDF_MAX_WIDTH_PT, height: float = PDF_MAX_HEIGHT_PT):
+    """Build a ReportLab image flowable scaled to its natural size, never upscaled."""
+    intrinsic_width, intrinsic_height = image_dimensions(image_bytes)
+    draw_width, draw_height = display_size_pt(
+        intrinsic_width,
+        intrinsic_height,
+        max_width_pt=float(width),
+        max_height_pt=float(height),
+    )
+    try:
+        return RLImage(BytesIO(image_bytes), width=draw_width, height=draw_height)
+    except Exception:
+        return None
+
+
+def _docx_add_picture(doc, image_bytes: bytes, width_inches: float = DOCX_MAX_WIDTH_IN) -> bool:
+    """Embed an image into a DOCX at natural scale, skipping undecodable formats.
+
+    PowerPoint decks frequently carry EMF/WMF vector assets that python-docx
+    rejects. A single such asset must not fail the whole document render.
+    """
+    intrinsic_width, intrinsic_height = image_dimensions(image_bytes)
+    draw_width, _ = display_size_inches(
+        intrinsic_width,
+        intrinsic_height,
+        max_width_in=width_inches,
+    )
+    try:
+        doc.add_picture(BytesIO(image_bytes), width=Inches(draw_width))
+        return True
+    except Exception:
+        return False
 
 
 def _draw_brand_header(canvas_obj, doc_obj) -> None:
@@ -303,15 +384,17 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
             image_bytes = image_lookup.get(image_name)
             if image_bytes is not None:
                 used_image_names.add(image_name)
-                figure_number += 1
-                story.append(Spacer(1, 6))
-                story.append(RLImage(BytesIO(image_bytes), width=430, height=260, kind="proportional"))
-                story.append(
-                    Paragraph(
-                        _markdown_to_reportlab_markup(_figure_caption(figure_number, current_section)),
-                        caption_style,
+                flowable = _pdf_image_flowable(image_bytes, width=PDF_MAX_WIDTH_PT, height=PDF_MAX_HEIGHT_PT)
+                if flowable is not None:
+                    figure_number += 1
+                    story.append(Spacer(1, 6))
+                    story.append(flowable)
+                    story.append(
+                        Paragraph(
+                            _markdown_to_reportlab_markup(_figure_caption(figure_number, current_section)),
+                            caption_style,
+                        )
                     )
-                )
             continue
 
         if re.match(r"^[-*•]\s+", line):
@@ -335,7 +418,7 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
             heading = line[4:].strip()
             current_section = heading
             story.append(Paragraph(_markdown_to_reportlab_markup(heading), h3_style))
-        elif line.startswith("## ") or line.endswith(":"):
+        elif line.startswith("## ") or _looks_like_heading(line):
             heading = line[3:].strip() if line.startswith("## ") else line
             current_section = heading
             story.append(Paragraph(_markdown_to_reportlab_markup(heading), h2_style))
@@ -352,9 +435,12 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
             image_bytes = image_lookup.get(image.image_name)
             if image_bytes is None:
                 continue
+            flowable = _pdf_image_flowable(image_bytes, width=PDF_MAX_WIDTH_PT, height=PDF_MAX_HEIGHT_PT)
+            if flowable is None:
+                continue
             story.append(Paragraph(_markdown_to_reportlab_markup(image.image_name), body_style))
             story.append(Spacer(1, 4))
-            story.append(RLImage(BytesIO(image_bytes), width=420, height=220, kind="proportional"))
+            story.append(flowable)
             story.append(Spacer(1, 10))
     doc.build(story, onFirstPage=_draw_brand_header, onLaterPages=_draw_brand_header)
     return buffer.getvalue()
@@ -455,12 +541,12 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
             image_bytes = image_lookup.get(image_name)
             if image_bytes is not None:
                 used_image_names.add(image_name)
-                figure_number += 1
-                doc.add_picture(BytesIO(image_bytes), width=Inches(5.8))
-                caption_para = doc.add_paragraph()
-                caption_run = caption_para.add_run(_figure_caption(figure_number, current_section))
-                caption_run.italic = True
-                caption_run.font.size = Pt(9)
+                if _docx_add_picture(doc, image_bytes):
+                    figure_number += 1
+                    caption_para = doc.add_paragraph()
+                    caption_run = caption_para.add_run(_figure_caption(figure_number, current_section))
+                    caption_run.italic = True
+                    caption_run.font.size = Pt(9)
             continue
 
         if re.match(r"^[-*•]\s+", line):
@@ -484,7 +570,7 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
             current_section = heading
             heading_para = doc.add_heading(level=3)
             _add_markdown_runs_docx(heading_para, heading)
-        elif line.startswith("## ") or line.endswith(":"):
+        elif line.startswith("## ") or _looks_like_heading(line):
             heading = line[3:].strip() if line.startswith("## ") else line
             current_section = heading
             heading_para = doc.add_heading(level=2)
@@ -503,8 +589,10 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
             image_bytes = image_lookup.get(image.image_name)
             if image_bytes is None:
                 continue
-            doc.add_paragraph(image.image_name)
-            doc.add_picture(BytesIO(image_bytes), width=Inches(5.8))
+            caption = doc.add_paragraph(image.image_name)
+            if not _docx_add_picture(doc, image_bytes):
+                # Drop the orphaned caption when the image cannot be embedded.
+                caption._element.getparent().remove(caption._element)
 
     buffer = BytesIO()
     doc.save(buffer)
