@@ -10,7 +10,7 @@
 
 ---
 
-## 📌 Executive Summary
+## Executive Summary
 - **Engineered an end-to-end multi-modal document synthesis platform** converting 170+ slide enterprise decks into 70-page, publication-grade PDF and DOCX technical reference manuals.
 - **Designed a hybrid LLM-deterministic architecture** integrating local LLM batch inference (Ollama/Llama 3) with a zero-loss deterministic fallback engine, achieving 100% pipeline reliability and zero broken references during model timeouts.
 - **Developed an XML relationship tree (`.part.rels`) parser** in `python-pptx` to extract and inline 79 high-res figures and 42 styled enterprise tables with dynamic sequential figure captions and zebra striping.
@@ -19,7 +19,7 @@
 
 ---
 
-## 🔬 Novel Components & Key Innovations
+## Novel Components & Key Innovations
 
 ### 1. Hybrid Resilient Synthesis Pipeline (Zero-Downtime Fallback)
 - **Problem**: Large slide decks (150+ slides) require high-concurrency LLM inference that often exhausts local GPU/CPU VRAM or hits HTTP timeouts, resulting in partial or failed documents.
@@ -46,7 +46,7 @@
 
 ---
 
-## 📊 Measured System Performance
+## Measured System Performance
 
 | Metric | Measured Value |
 |---|---|
@@ -60,7 +60,7 @@
 
 ---
 
-## 🛠️ Tech Stack & Architecture
+## Tech Stack & Architecture
 
 - **Backend / API**: Python 3.11+, FastAPI, Uvicorn, Pydantic v2
 - **Document Rendering**: ReportLab Platypus (PDF engine), python-docx (Word engine)
@@ -70,7 +70,7 @@
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### 1. Installation
 ```powershell
