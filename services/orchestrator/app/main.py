@@ -55,6 +55,7 @@ metrics_registry = MetricsRegistry(
 )
 _compose_jobs: dict[str, dict[str, object]] = {}
 _model_availability_cache: dict[str, tuple[bool, float]] = {}
+_installed_models_cache: tuple[set[str], float] | None = None
 
 
 @asynccontextmanager
@@ -177,12 +178,28 @@ def _write_generation_cache(cache_key: str, *, model_name: str, prompt: str, res
 
 
 async def _model_available(model_name: str) -> bool:
+    names = await _installed_model_names()
     cached = _model_availability_cache.get(model_name)
     now = time.time()
     if cached and (now - cached[1]) <= settings.llm_capability_ttl_seconds:
         return cached[0]
 
-    available = False
+    available = model_name in names
+
+    _model_availability_cache[model_name] = (available, now)
+    return available
+
+
+async def _installed_model_names(force_refresh: bool = False) -> set[str]:
+    global _installed_models_cache
+
+    now = time.time()
+    if not force_refresh and _installed_models_cache is not None:
+        cached_names, cached_at = _installed_models_cache
+        if (now - cached_at) <= settings.llm_capability_ttl_seconds:
+            return set(cached_names)
+
+    names: set[str] = set()
     try:
         response = await app.state.http_client.get(f"{settings.llm_base_url}/api/tags")
         response.raise_for_status()
@@ -190,14 +207,42 @@ async def _model_available(model_name: str) -> bool:
         names = {
             item.get("name", "")
             for item in data.get("models", [])
-            if isinstance(item, dict)
+            if isinstance(item, dict) and item.get("name")
         }
-        available = model_name in names
     except Exception:
-        available = False
+        names = set()
 
-    _model_availability_cache[model_name] = (available, now)
-    return available
+    _installed_models_cache = (names, now)
+    return set(names)
+
+
+def _vision_model_candidates() -> list[str]:
+    candidates = [settings.vision_model]
+    candidates.extend(
+        item.strip()
+        for item in settings.vision_model_fallbacks.split(",")
+        if item.strip()
+    )
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return ordered
+
+
+async def _resolve_vision_model() -> str | None:
+    installed = await _installed_model_names()
+    for candidate in _vision_model_candidates():
+        if candidate in installed:
+            return candidate
+    for candidate in sorted(installed):
+        lowered = candidate.lower()
+        if "vision" in lowered or "llava" in lowered or "moondream" in lowered:
+            return candidate
+    return None
 
 
 def _job_snapshot_path(job_id: str) -> Path:
@@ -1438,12 +1483,21 @@ async def _extract_text_from_images(image_inputs: list[ImageInput]) -> list[str]
     if not image_inputs:
         return snippets
 
+    normalized_images: list[tuple[ImageInput, str]] = []
     for image in image_inputs:
         normalized = _normalize_base64(image.content_base64)
         try:
             base64.b64decode(normalized, validate=True)
         except binascii.Error as exc:
             raise HTTPException(status_code=400, detail=f"Invalid base64 image payload for {image.image_name}") from exc
+        normalized_images.append((image, normalized))
+
+    vision_model = await _resolve_vision_model()
+    if vision_model is None:
+        logger.info("vision_model_unavailable configured=%s candidates=%s", settings.vision_model, ", ".join(_vision_model_candidates()))
+        return snippets
+
+    for image, normalized in normalized_images:
 
         vision_prompt = (
             "Extract all readable text from the provided document image. "
@@ -1453,12 +1507,12 @@ async def _extract_text_from_images(image_inputs: list[ImageInput]) -> list[str]
         try:
             extracted = await _generate_with_llm(
                 prompt=vision_prompt,
-                model_override=settings.vision_model,
+                model_override=vision_model,
                 images=[normalized],
             )
         except HTTPException as exc:
             if exc.status_code == 502:
-                logger.info("vision_model_unavailable image=%s model=%s", image.image_name, settings.vision_model)
+                logger.info("vision_model_unavailable image=%s model=%s", image.image_name, vision_model)
                 continue
             else:
                 raise
@@ -1472,6 +1526,27 @@ async def _extract_text_from_images(image_inputs: list[ImageInput]) -> list[str]
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "env": settings.app_env}
+
+
+@app.get("/capabilities")
+async def capabilities() -> dict[str, object]:
+    installed_models = sorted(await _installed_model_names())
+    resolved_vision_model = await _resolve_vision_model()
+    configured_text_available = settings.llm_model in installed_models
+    configured_vision_available = settings.vision_model in installed_models
+
+    return {
+        "llm_base_url": settings.llm_base_url,
+        "configured_text_model": settings.llm_model,
+        "configured_vision_model": settings.vision_model,
+        "vision_candidates": _vision_model_candidates(),
+        "resolved_vision_model": resolved_vision_model,
+        "installed_models": installed_models,
+        "text_model_available": configured_text_available,
+        "vision_model_available": configured_vision_available,
+        "llm_cache_enabled": settings.llm_cache_enabled,
+        "background_jobs_enabled": True,
+    }
 
 
 @app.get("/benchmarks")

@@ -572,30 +572,23 @@ def test_generate_with_llm_uses_disk_cache(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_generate_with_llm_short_circuits_missing_vision_model(tmp_path: Path, monkeypatch) -> None:
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"models": [{"name": settings.llm_model}]}
-
     class FakeClient:
         def __init__(self):
-            self.gets = 0
             self.posts = 0
-
-        async def get(self, url):
-            self.gets += 1
-            return FakeResponse()
 
         async def post(self, url, json):
             self.posts += 1
-            return FakeResponse()
+            raise AssertionError("Vision short-circuit should happen before any POST")
 
     fake_client = FakeClient()
     monkeypatch.setattr(main, "llm_cache_dir", tmp_path / "llm_cache")
     monkeypatch.setattr(main, "_model_availability_cache", {})
+    monkeypatch.setattr(main, "_installed_models_cache", None)
     monkeypatch.setattr(main.app.state, "http_client", fake_client, raising=False)
+    async def fake_installed_models(force_refresh: bool = False):
+        return {settings.llm_model}
+
+    monkeypatch.setattr(main, "_installed_model_names", fake_installed_models)
 
     try:
         asyncio.run(main._generate_with_llm("Vision prompt", model_override=settings.vision_model, images=["abc"]))
@@ -605,5 +598,38 @@ def test_generate_with_llm_short_circuits_missing_vision_model(tmp_path: Path, m
     else:
         raise AssertionError("Expected missing vision model to raise HTTPException")
 
-    assert fake_client.gets == 1
     assert fake_client.posts == 0
+
+
+def test_resolve_vision_model_uses_fallback_when_configured_model_missing(monkeypatch) -> None:
+    async def fake_installed_models(force_refresh: bool = False):
+        return {"llava:7b", settings.llm_model}
+
+    monkeypatch.setattr(main, "_installed_model_names", fake_installed_models)
+
+    resolved = asyncio.run(main._resolve_vision_model())
+
+    assert resolved == "llava:7b"
+
+
+def test_capabilities_endpoint_reports_installed_and_resolved_models(monkeypatch) -> None:
+    async def fake_installed_models(force_refresh: bool = False):
+        return {settings.llm_model, "llava:7b"}
+
+    async def fake_resolve_vision_model():
+        return "llava:7b"
+
+    monkeypatch.setattr(main, "_installed_model_names", fake_installed_models)
+    monkeypatch.setattr(main, "_resolve_vision_model", fake_resolve_vision_model)
+
+    response = client.get("/capabilities")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["configured_text_model"] == settings.llm_model
+    assert payload["configured_vision_model"] == settings.vision_model
+    assert payload["resolved_vision_model"] == "llava:7b"
+    assert payload["text_model_available"] is True
+    assert payload["vision_model_available"] is False
+    assert "llava:7b" in payload["installed_models"]
+    assert payload["background_jobs_enabled"] is True
