@@ -48,6 +48,24 @@ def test_document_title_falls_back_to_source_name_when_no_cover_title() -> None:
     assert title == "Sandbox environment — Technical Documentation"
 
 
+def test_topic_narrative_mentions_each_figure_with_descriptive_context() -> None:
+    unit = main._TopicUnit(
+        title="Environment Setup",
+        lines=[
+            "The sandbox provisions a dedicated VM with isolated network access.",
+            "Operators validate connectivity, certificates, and permissions before onboarding users.",
+        ],
+        images=[SimpleNamespace(image_name="setup-figure.png")],
+    )
+
+    narrative = main._deterministic_topic_narrative(unit)
+
+    assert "Figure" in narrative
+    assert "illustrates" in narrative.lower()
+    assert "setup-figure.png" not in narrative
+    assert "isolated network access" in narrative
+
+
 def test_document_title_uses_last_resort_when_nothing_usable() -> None:
     req = SimpleNamespace(user_prompt="generate docs", objective="", domain="general")
 

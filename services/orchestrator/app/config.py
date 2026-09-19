@@ -9,6 +9,9 @@ class Settings(BaseSettings):
 
     llm_base_url: str = "http://llm:11434"
     llm_model: str = "llama3.1:8b-instruct"
+    llm_fast_model: str = "llama3.1:8b-instruct"
+    llm_default_model: str = "llama3.1:8b-instruct"
+    llm_strong_model: str = "llama3.1:8b-instruct"
     vision_model: str = "llama3.2-vision:11b"
     vision_model_fallbacks: str = "llava:7b,llava:13b,moondream:latest"
     llm_timeout_seconds: int = 60

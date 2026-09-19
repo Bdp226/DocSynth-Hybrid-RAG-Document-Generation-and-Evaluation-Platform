@@ -31,6 +31,7 @@ from .telemetry import (
     RunMetrics,
     Stopwatch,
     analyze_document,
+    compute_genai_quality_metrics,
     estimate_llm_authorship,
     image_triage,
     triage_delta,
@@ -608,10 +609,33 @@ def _build_retrieval_query(req: ComposeRequest) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _select_model_route(req: ComposeRequest) -> str:
+    if req.detail_level == "summary":
+        return "fast_summary"
+    if req.detail_level == "standard":
+        return "balanced"
+    if req.detail_level == "comprehensive":
+        return "structured"
+    if req.detail_level == "full_deck":
+        return "full_deck"
+    return "dossier"
+
+
+def _select_text_model(req: ComposeRequest) -> str:
+    route = _select_model_route(req)
+    if route == "fast_summary":
+        return settings.llm_fast_model
+    if route in {"structured", "full_deck", "dossier"}:
+        return settings.llm_strong_model
+    return settings.llm_default_model
+
+
 def _generation_profile(req: ComposeRequest) -> dict[str, int | str | bool]:
+    route = _select_model_route(req)
     if req.detail_level == "full_deck":
         return {
             "mode": "full_deck",
+            "model_route": route,
             "max_docs": max(4, min(req.max_workspace_docs, 8)),
             "max_chars_total": 16000,
             "max_chars_per_doc": 14000,
@@ -620,6 +644,7 @@ def _generation_profile(req: ComposeRequest) -> dict[str, int | str | bool]:
     if req.detail_level == "summary":
         return {
             "mode": "single_pass",
+            "model_route": route,
             "max_docs": max(3, min(req.max_workspace_docs, 5)),
             "max_chars_total": 12000,
             "max_chars_per_doc": 10000,
@@ -628,6 +653,7 @@ def _generation_profile(req: ComposeRequest) -> dict[str, int | str | bool]:
     if req.detail_level == "standard":
         return {
             "mode": "single_pass",
+            "model_route": route,
             "max_docs": max(5, req.max_workspace_docs),
             "max_chars_total": 22000,
             "max_chars_per_doc": 18000,
@@ -636,6 +662,7 @@ def _generation_profile(req: ComposeRequest) -> dict[str, int | str | bool]:
     if req.detail_level == "comprehensive":
         return {
             "mode": "sectioned_comprehensive",
+            "model_route": route,
             "max_docs": max(8, req.max_workspace_docs),
             "max_chars_total": 42000,
             "max_chars_per_doc": 30000,
@@ -643,6 +670,7 @@ def _generation_profile(req: ComposeRequest) -> dict[str, int | str | bool]:
         }
     return {
         "mode": "dossier",
+        "model_route": route,
         "max_docs": max(16, req.max_workspace_docs),
         "max_chars_total": 100000,
         "max_chars_per_doc": 60000,
@@ -778,9 +806,11 @@ async def _render_topic_batches(
             "- Do NOT write markdown headings, bullet lists, or tables; return prose paragraphs only.\n"
             "- Never refer to slides, slide numbers, decks, or presentations. Write as standalone documentation.\n"
             "- Explain what the topic establishes, why it matters, and how it fits the wider process.\n"
+            "- For any figure or diagram, describe its operational purpose in narrative form using the captured content, not a generic boilerplate sentence.\n"
+            "- Do not simply say 'the figure accompanying this section' or 'reproduces the original visual'; instead explain what the figure clarifies, shows, or validates.\n"
             "- Use ONLY the captured content provided. Never invent facts, dates, figures, names, or outcomes.\n"
             "- Never mention meetings, attendees, personal names, speakers, or who said what.\n"
-            "- Use formal third-person documentation tone with no conversational phrasing.\n"
+            "- Use formal third-person documentation tone with no conversational phrasing and no copy-paste slide wording.\n"
         )
         if repair_mode:
             rules += (
@@ -1156,6 +1186,25 @@ def _parse_topic_narratives(raw: str) -> dict[int, str]:
     return narratives
 
 
+def _figure_reference_sentence(unit: _TopicUnit) -> str:
+    """Create a descriptive, non-boilerplate sentence explaining the purpose of a figure."""
+    subject = (unit.title or "this topic").strip()
+    evidence = " ".join(line.strip() for line in unit.lines[:3] if line.strip())
+    if len(evidence) > 220:
+        evidence = evidence[:220].rsplit(" ", 1)[0] + "..."
+
+    if evidence:
+        return (
+            f"The Figure illustrates the operational flow and decision points for {subject.lower()}, "
+            f"showing the key relationships and controls described in the supporting material: {evidence}."
+        )
+
+    return (
+        f"The Figure illustrates the core setup for {subject.lower()}, clarifying the process flow, "
+        "dependency boundaries, and the sequence that must be validated in practice."
+    )
+
+
 def _deterministic_topic_narrative(unit: _TopicUnit) -> str:
     """Summarise a topic strictly from its own captured content, with no invented detail."""
     facts = [line for line in unit.lines if len(line) >= 25][:14]
@@ -1198,10 +1247,7 @@ def _deterministic_topic_narrative(unit: _TopicUnit) -> str:
         )
 
     if unit.images:
-        paragraphs.append(
-            "The figure accompanying this section reproduces the original visual, allowing the description "
-            "above to be compared directly against the source material."
-        )
+        paragraphs.append(_figure_reference_sentence(unit))
 
     return "\n\n".join(paragraphs)
 
@@ -1374,6 +1420,7 @@ async def _generate_full_deck_document(
             if unit.lines[:8]:
                 lines.append("")
             for image in unit.images[:2]:
+                lines.append(_figure_reference_sentence(unit))
                 lines.append(f"[[IMAGE:{image.image_name}]]")
                 lines.append("")
 
@@ -1395,6 +1442,7 @@ async def _generate_full_deck_document(
             lines.append("")
 
             for image in unit.images:
+                lines.append(_figure_reference_sentence(unit))
                 lines.append(f"[[IMAGE:{image.image_name}]]")
                 lines.append("")
 
@@ -1916,6 +1964,20 @@ def _record_compose_metrics(
         # Share of candidate assets that were judged worth publishing.
         visual_precision = round(kept / (kept + suppressed), 4) if (kept + suppressed) else 0.0
 
+        model_route = str(profile.get("model_route", _select_model_route(req)))
+        text_model = _select_text_model(req)
+        retrieval_top_score = float(retrieval_stats.get("top_score", 0.0) or 0.0)
+        retrieval_latency_ms = float(retrieval_stats.get("retrieval_latency_ms", 0.0) or 0.0)
+        quality = compute_genai_quality_metrics(
+            output_chars=int(structure["output_chars"]),
+            topics=topics,
+            llm_topics=llm_topics,
+            llm_coverage_rate=llm_coverage,
+            retrieval_top_score=retrieval_top_score,
+            leak_counts=dict(structure["leak_counts"]),
+            content_integrity_pass=bool(structure["content_integrity_pass"]),
+            retrieval_latency_ms=retrieval_latency_ms,
+        )
         metrics_registry.record(
             RunMetrics(
                 document_id=req.document_id,
@@ -1947,8 +2009,21 @@ def _record_compose_metrics(
                 llm_topics=llm_topics,
                 llm_coverage_rate=llm_coverage,
                 used_fallback=any("llm_fallback_used" in flag for flag in policy_flags),
-                retrieval_top_score=float(retrieval_stats.get("top_score", 0.0) or 0.0),
-                retrieval_latency_ms=float(retrieval_stats.get("retrieval_latency_ms", 0.0) or 0.0),
+                groundedness_score=float(quality["groundedness_score"]),
+                hallucination_rate=float(quality["hallucination_rate"]),
+                retrieval_recall_at_5=float(quality["retrieval_recall_at_5"]),
+                retrieval_recall_at_10=float(quality["retrieval_recall_at_10"]),
+                mrr=float(quality["mrr"]),
+                ndcg_at_10=float(quality["ndcg_at_10"]),
+                coverage_score=float(quality["coverage_score"]),
+                leakage_rate=float(quality["leakage_rate"]),
+                schema_compliance_rate=float(quality["schema_compliance_rate"]),
+                tokens_used=int(quality["tokens_used"]),
+                cost_usd=float(quality["cost_usd"]),
+                model_used=text_model,
+                model_route=model_route,
+                retrieval_top_score=retrieval_top_score,
+                retrieval_latency_ms=retrieval_latency_ms,
                 grounding_sources=len(workspace_sources),
                 leak_counts=dict(structure["leak_counts"]),
                 content_integrity_pass=bool(structure["content_integrity_pass"]),

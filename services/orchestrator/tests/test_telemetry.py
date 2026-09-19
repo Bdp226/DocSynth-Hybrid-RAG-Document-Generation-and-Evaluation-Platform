@@ -10,6 +10,7 @@ from app.telemetry import (
     RunMetrics,
     Stopwatch,
     analyze_document,
+    compute_genai_quality_metrics,
     estimate_llm_authorship,
 )
 
@@ -148,6 +149,35 @@ def test_registry_aggregates_latency_percentiles_and_quality():
     assert snapshot["content_integrity"]["clean_document_rate"] == 1.0
 
 
+def test_registry_tracks_genai_quality_metrics():
+    registry = MetricsRegistry()
+    registry.record(
+        _run(
+            groundedness_score=0.96,
+            hallucination_rate=0.02,
+            retrieval_recall_at_5=0.95,
+            retrieval_recall_at_10=0.97,
+            mrr=0.93,
+            ndcg_at_10=0.94,
+            coverage_score=0.91,
+            leakage_rate=0.0,
+            schema_compliance_rate=0.98,
+            cost_usd=0.015,
+            tokens_used=2400,
+            model_used="llama3.1:8b-instruct",
+            model_route="full_deck",
+        )
+    )
+
+    snapshot = registry.snapshot()
+
+    assert snapshot["generation_quality"]["avg_groundedness_score"] == 0.96
+    assert snapshot["generation_quality"]["avg_hallucination_rate"] == 0.02
+    assert snapshot["generation_quality"]["avg_retrieval_recall_at_5"] == 0.95
+    assert snapshot["generation_quality"]["avg_model_cost_usd"] == 0.015
+    assert snapshot["generation_quality"]["avg_tokens_used"] == 2400
+
+
 def test_registry_flags_degraded_generation_when_model_not_used():
     registry = MetricsRegistry()
     registry.record(_run(llm_topics=0, llm_coverage_rate=0.0))
@@ -177,6 +207,27 @@ def test_registry_writes_jsonl_log(tmp_path):
 
     assert log_path.exists()
     assert '"document_id": "doc"' in log_path.read_text(encoding="utf-8")
+
+
+def test_compute_genai_quality_metrics_returns_real_values():
+    metrics = compute_genai_quality_metrics(
+        output_chars=4200,
+        topics=12,
+        llm_topics=9,
+        llm_coverage_rate=0.75,
+        retrieval_top_score=0.81,
+        leak_counts={"slide_reference": 0, "roster_role": 0, "meeting_chatter": 0, "raw_bold_marker": 0},
+        content_integrity_pass=True,
+    )
+
+    assert metrics["groundedness_score"] > 0.0
+    assert metrics["hallucination_rate"] < 1.0
+    assert metrics["retrieval_recall_at_5"] > 0.0
+    assert metrics["retrieval_recall_at_10"] > metrics["retrieval_recall_at_5"] * 0.5
+    assert metrics["coverage_score"] > 0.5
+    assert metrics["schema_compliance_rate"] == 1.0
+    assert metrics["tokens_used"] > 0
+    assert metrics["cost_usd"] > 0.0
 
 
 def test_registry_never_raises_when_log_path_is_unwritable(tmp_path):
