@@ -8,7 +8,7 @@ sentence-transformers==3.1.1
 python-docx==1.1.2
 reportlab==4.2.5
 aiofiles==24.1.0
-pypdf==5.0.1
+pypdf==6.18.1
 python-pptx==1.0.2
 
 # Imported directly by app/image_intelligence.py. Declared explicitly rather
