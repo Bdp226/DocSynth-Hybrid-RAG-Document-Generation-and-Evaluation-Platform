@@ -62,7 +62,7 @@ class BM25Index:
     postings: dict[str, dict[int, int]] = field(default_factory=dict)
 
     @classmethod
-    def build(cls, documents: list[str]) -> "BM25Index":
+    def build(cls, documents: list[str]) -> BM25Index:
         index = cls(doc_count=len(documents))
         total_length = 0
         for doc_id, document in enumerate(documents):

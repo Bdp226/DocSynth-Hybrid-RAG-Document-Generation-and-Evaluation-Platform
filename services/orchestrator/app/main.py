@@ -13,16 +13,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import RedirectResponse
-from fastapi.responses import FileResponse
-from fastapi.responses import PlainTextResponse
-from fastapi.staticfiles import StaticFiles
 import httpx
+from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from .artifact_store import load_artifact, save_artifact
-from .config import settings
+from .config import SERVICE_NAME, SERVICE_VERSION, settings
 from .document_builder import generate_artifacts
+from .ingress import RateLimiter, client_key, oversized_request_bytes
 from .models import ComposeRequest, ComposeResponse, ImageInput, OptimizeRequest, OptimizeResponse
 from .policy import detect_policy_flags, enforce_input_limits
 from .security import RequestContext, get_request_context
@@ -43,7 +43,6 @@ from .workspace_context import (
     select_workspace_files,
 )
 
-
 logger = logging.getLogger("doc_optimizer.api")
 job_state_dir = Path(__file__).resolve().parent.parent / "build" / "jobs"
 llm_cache_dir = Path(__file__).resolve().parent.parent / "build" / "llm_cache"
@@ -51,28 +50,111 @@ llm_cache_dir = Path(__file__).resolve().parent.parent / "build" / "llm_cache"
 # Observability sink for service-level KPIs. Recording is best-effort and never
 # participates in request success or failure. The log lives under build/ so it is
 # git-ignored and outside the retriever's workspace scope.
-metrics_registry = MetricsRegistry(
-    log_path=Path(__file__).resolve().parent.parent / "build" / "docsynth_metrics.jsonl"
-)
+metrics_registry = MetricsRegistry(log_path=Path(__file__).resolve().parent.parent / "build" / "docsynth_metrics.jsonl")
 _compose_jobs: dict[str, dict[str, object]] = {}
 _model_availability_cache: dict[str, tuple[bool, float]] = {}
 _installed_models_cache: tuple[set[str], float] | None = None
+
+# Per-replica ingress backstop. See app/ingress.py for why this is in-process.
+rate_limiter = RateLimiter(
+    requests_per_minute=settings.rate_limit_requests_per_minute,
+    burst=settings.rate_limit_burst,
+)
+
+SERVICE_STARTED_AT = time.time()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.http_client = httpx.AsyncClient(timeout=settings.llm_timeout_seconds)
+    logger.info(
+        json.dumps(
+            {
+                "event": "service_started",
+                "service": SERVICE_NAME,
+                "version": SERVICE_VERSION,
+                "env": settings.app_env,
+                "git_commit": settings.git_commit,
+            },
+            separators=(",", ":"),
+        )
+    )
     try:
         yield
     finally:
         await app.state.http_client.aclose()
 
 
-app = FastAPI(title="Document Optimizer Orchestrator", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="DocSynth Orchestrator",
+    description=(
+        "Enterprise multi-modal document synthesis: grounded retrieval, visual triage, "
+        "LLM generation, publication-ready rendering, and KPI telemetry."
+    ),
+    version=SERVICE_VERSION,
+    lifespan=lifespan,
+)
 static_dir = Path(__file__).parent / "static"
 app.mount("/ui", StaticFiles(directory=str(static_dir), html=True), name="ui")
 workspace_root = Path(__file__).resolve().parents[3]
 benchmark_report_path = workspace_root / "pipelines" / "eval" / "last_eval_report.json"
+
+if settings.cors_enabled and settings.cors_origin_list:
+    # Opt-in only, and never a wildcard: credentials-bearing identity headers
+    # must not be readable by arbitrary origins.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origin_list,
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-User-Id", "X-User-Role", "X-Request-Id"],
+        expose_headers=["X-Request-Id"],
+    )
+
+
+@app.middleware("http")
+async def ingress_guard_middleware(request, call_next):
+    """Reject oversized and over-quota traffic before it reaches the pipeline."""
+    path = request.url.path
+
+    oversized = oversized_request_bytes(request.headers.get("content-length"), settings.max_request_bytes)
+    if oversized is not None:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "detail": "Request body exceeds the configured limit",
+                "max_request_bytes": settings.max_request_bytes,
+                "received_bytes": oversized,
+            },
+        )
+
+    if path in settings.rate_limit_exempt_path_set or path.startswith("/ui"):
+        return await call_next(request)
+
+    key = client_key(request.headers.get("X-User-Id"), request.client.host if request.client else None)
+    decision = rate_limiter.check(key)
+    if not decision.allowed:
+        logger.warning(
+            json.dumps(
+                {"event": "rate_limited", "key": key, "path": path, "limit": decision.limit},
+                separators=(",", ":"),
+            )
+        )
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded", "retry_after_seconds": decision.retry_after_seconds},
+            headers={
+                "Retry-After": str(decision.retry_after_seconds),
+                "X-RateLimit-Limit": str(decision.limit),
+                "X-RateLimit-Remaining": "0",
+            },
+        )
+
+    response = await call_next(request)
+    if decision.limit:
+        response.headers["X-RateLimit-Limit"] = str(decision.limit)
+        response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
+    return response
 
 
 @app.middleware("http")
@@ -110,7 +192,9 @@ def _normalize_base64(content: str) -> str:
     return content.strip()
 
 
-def _merge_image_inputs(primary: list[ImageInput], secondary: list[ImageInput], max_total: int = 12) -> list[ImageInput]:
+def _merge_image_inputs(
+    primary: list[ImageInput], secondary: list[ImageInput], max_total: int = 12
+) -> list[ImageInput]:
     merged: list[ImageInput] = []
     seen: set[str] = set()
 
@@ -205,11 +289,7 @@ async def _installed_model_names(force_refresh: bool = False) -> set[str]:
         response = await app.state.http_client.get(f"{settings.llm_base_url}/api/tags")
         response.raise_for_status()
         data = response.json()
-        names = {
-            item.get("name", "")
-            for item in data.get("models", [])
-            if isinstance(item, dict) and item.get("name")
-        }
+        names = {item.get("name", "") for item in data.get("models", []) if isinstance(item, dict) and item.get("name")}
     except Exception:
         names = set()
 
@@ -219,11 +299,7 @@ async def _installed_model_names(force_refresh: bool = False) -> set[str]:
 
 def _vision_model_candidates() -> list[str]:
     candidates = [settings.vision_model]
-    candidates.extend(
-        item.strip()
-        for item in settings.vision_model_fallbacks.split(",")
-        if item.strip()
-    )
+    candidates.extend(item.strip() for item in settings.vision_model_fallbacks.split(",") if item.strip())
     seen: set[str] = set()
     ordered: list[str] = []
     for candidate in candidates:
@@ -317,9 +393,7 @@ def _fallback_compose_text(
             return True
         if re.search(r"\b[a-z]\s+days\b", lowered):
             return True
-        if re.search(r"(?:\b[A-Z][a-z]+\b,\s*){2,}\b(?:and\s+)?[A-Z][a-z]+\b", text):
-            return True
-        return False
+        return bool(re.search("(?:\\b[A-Z][a-z]+\\b,\\s*){2,}\\b(?:and\\s+)?[A-Z][a-z]+\\b", text))
 
     def clean_sentence(text: str) -> str:
         normalized = re.sub(r"\[[^\]]+\]", "", text)
@@ -367,7 +441,7 @@ def _fallback_compose_text(
             return []
         paragraphs: list[str] = []
         for index in range(0, len(block), group_size):
-            paragraphs.append(" ".join(block[index:index + group_size]))
+            paragraphs.append(" ".join(block[index : index + group_size]))
         return paragraphs
 
     def blueprint_fragments(blueprint: dict[str, str | list[str]]) -> list[str]:
@@ -387,7 +461,9 @@ def _fallback_compose_text(
     lines: list[str] = [f"# {title}", ""]
 
     lines.append("## Objective")
-    lines.append(clean_sentence(user_prompt) or "Generate a structured, publication-ready document from the available evidence.")
+    lines.append(
+        clean_sentence(user_prompt) or "Generate a structured, publication-ready document from the available evidence."
+    )
     lines.append("")
 
     if retrieved_chunks:
@@ -569,9 +645,7 @@ def _finalize_document_text(
 def _looks_generic_prompt(prompt: str) -> bool:
     tokens = [token for token in re.findall(r"[a-zA-Z0-9_]+", prompt.lower()) if token]
     generic_terms = {"generate", "pdf", "doc", "document", "documentation", "comprehensive", "report", "file"}
-    if len(tokens) <= 5 and all(token in generic_terms for token in tokens):
-        return True
-    return False
+    return bool(len(tokens) <= 5 and all(token in generic_terms for token in tokens))
 
 
 def _professional_authoring_brief(req: ComposeRequest, workspace_sources: list[str]) -> tuple[str, str, list[str]]:
@@ -771,10 +845,14 @@ def _chunks_for_section(retrieved_chunks, blueprint: dict[str, str | list[str]],
 
 
 def _batch_items(items, batch_size: int):
-    return [items[index:index + batch_size] for index in range(0, len(items), batch_size) if items[index:index + batch_size]]
+    return [
+        items[index : index + batch_size]
+        for index in range(0, len(items), batch_size)
+        if items[index : index + batch_size]
+    ]
 
 
-def _topic_prompt_payload(index: int, unit: object) -> str:
+def _topic_prompt_payload(index: int, unit: _TopicUnit) -> str:
     body = "\n".join(f"- {line}" for line in unit.lines[:22])
     if not body:
         body = "- (This topic is conveyed through diagrams or tables rather than body text.)"
@@ -789,7 +867,7 @@ def _topic_prompt_payload(index: int, unit: object) -> str:
 
 async def _render_topic_batches(
     req: ComposeRequest,
-    indexed_units: list[tuple[int, object]],
+    indexed_units: list[tuple[int, _TopicUnit]],
     *,
     batch_size: int,
     max_concurrency: int,
@@ -863,13 +941,11 @@ async def _generate_comprehensive_document(
     retrieved_chunks,
     image_context: str,
 ) -> str:
-    chunk_batches = [retrieved_chunks[index:index + 4] for index in range(0, min(len(retrieved_chunks), 16), 4)]
+    chunk_batches = [retrieved_chunks[index : index + 4] for index in range(0, min(len(retrieved_chunks), 16), 4)]
     section_drafts: list[str] = []
 
     for batch_index, batch in enumerate(chunk_batches, start=1):
-        chunk_context = "\n\n".join(
-            f"Source: {item.chunk_id}\n{item.text.strip()}" for item in batch
-        )
+        chunk_context = "\n\n".join(f"Source: {item.chunk_id}\n{item.text.strip()}" for item in batch)
         batch_prompt = (
             "You are drafting one detailed section of a formal enterprise document. "
             "Use the retrieved source material exhaustively instead of summarizing it away. "
@@ -928,9 +1004,7 @@ async def _generate_dossier_document(
         section_chunks = _chunks_for_section(retrieved_chunks, blueprint, limit=8)
         module_outputs: list[str] = []
         for module_index, module_chunks in enumerate(_batch_items(section_chunks, 2), start=1):
-            chunk_context = "\n\n".join(
-                f"Source: {item.chunk_id}\n{item.text.strip()}" for item in module_chunks
-            )
+            chunk_context = "\n\n".join(f"Source: {item.chunk_id}\n{item.text.strip()}" for item in module_chunks)
             module_prompt = (
                 "You are drafting one subsection module of a long-form formal documentation package. "
                 "Write a dense, specific, source-grounded subsection of roughly 220 to 420 words. "
@@ -971,28 +1045,93 @@ async def _generate_dossier_document(
 _PART_TAXONOMY: list[tuple[str, tuple[str, ...]]] = [
     (
         "Programme Overview and Objectives",
-        ("overview", "objective", "vision", "introduction", "playground", "evaluate", "evaluation",
-         "accelerat", "current state", "assessment", "way forward", "executive", "scope", "goal"),
+        (
+            "overview",
+            "objective",
+            "vision",
+            "introduction",
+            "playground",
+            "evaluate",
+            "evaluation",
+            "accelerat",
+            "current state",
+            "assessment",
+            "way forward",
+            "executive",
+            "scope",
+            "goal",
+        ),
     ),
     (
         "Commercial Onboarding and Compliance",
-        ("nda", "pilot agreement", "vendor", "onboarding", "compliance", "procurement", "po release",
-         "purchase order", "contract", "legal", "dpia", "gdpr", "supplier"),
+        (
+            "nda",
+            "pilot agreement",
+            "vendor",
+            "onboarding",
+            "compliance",
+            "procurement",
+            "po release",
+            "purchase order",
+            "contract",
+            "legal",
+            "dpia",
+            "gdpr",
+            "supplier",
+        ),
     ),
     (
         "Solution Architecture and Data Flow",
-        ("architecture", "data flow", "dataflow", "design", "component", "integration", "topology",
-         "landscape", "diagram", "blueprint"),
+        (
+            "architecture",
+            "data flow",
+            "dataflow",
+            "design",
+            "component",
+            "integration",
+            "topology",
+            "landscape",
+            "diagram",
+            "blueprint",
+        ),
     ),
     (
         "Environment Setup and Configuration",
-        ("set-up", "setup", "provision", "install", "configure", "configuration", "fqdn", "domain name",
-         "ssl", "certificate", "virtual machine", "network", "firewall", "access", "vpn", "server"),
+        (
+            "set-up",
+            "setup",
+            "provision",
+            "install",
+            "configure",
+            "configuration",
+            "fqdn",
+            "domain name",
+            "ssl",
+            "certificate",
+            "virtual machine",
+            "network",
+            "firewall",
+            "access",
+            "vpn",
+            "server",
+        ),
     ),
     (
         "Tooling and Platform Capabilities",
-        ("tool", "dashboard", "agent", "potpie", "feature", "capability", "use case", "demo",
-         "metric", "hub", "copilot", "model"),
+        (
+            "tool",
+            "dashboard",
+            "agent",
+            "potpie",
+            "feature",
+            "capability",
+            "use case",
+            "demo",
+            "metric",
+            "hub",
+            "copilot",
+            "model",
+        ),
     ),
     (
         "Cost, Budget and Effort",
@@ -1000,13 +1139,35 @@ _PART_TAXONOMY: list[tuple[str, tuple[str, ...]]] = [
     ),
     (
         "Security, Risk and Governance",
-        ("security", "risk", "governance", "approval", "policy", "audit", "privacy", "threat",
-         "mitigat", "control", "confidential"),
+        (
+            "security",
+            "risk",
+            "governance",
+            "approval",
+            "policy",
+            "audit",
+            "privacy",
+            "threat",
+            "mitigat",
+            "control",
+            "confidential",
+        ),
     ),
     (
         "Programme Status and Milestones",
-        ("status", "milestone", "timeline", "roadmap", "plan", "progress", "update", "next step",
-         "kick-off", "kickoff", "schedule"),
+        (
+            "status",
+            "milestone",
+            "timeline",
+            "roadmap",
+            "plan",
+            "progress",
+            "update",
+            "next step",
+            "kick-off",
+            "kickoff",
+            "schedule",
+        ),
     ),
 ]
 _DEFAULT_PART_TITLE = "Supporting Reference Material"
@@ -1146,8 +1307,7 @@ def _render_markdown_table(table: list[list[str]], max_cell_chars: int = 90) -> 
     header_cells = [clean(header[i]) if i < len(header) else "" for i in keep]
     # Blank leading headers are almost always row-index columns.
     header_cells = [
-        cell or ("#" if position == 0 else f"Detail {position}")
-        for position, cell in enumerate(header_cells)
+        cell or ("#" if position == 0 else f"Detail {position}") for position, cell in enumerate(header_cells)
     ]
 
     rendered = ["| " + " | ".join(header_cells) + " |", "| " + " | ".join(["---"] * len(header_cells)) + " |"]
@@ -1236,7 +1396,9 @@ def _deterministic_topic_narrative(unit: _TopicUnit) -> str:
         if len(facts) > 3:
             paragraphs.append(f"{follow_ups[variant]} " + " ".join(facts[3:8]))
         if len(facts) > 8:
-            paragraphs.append("Additional points captured for completeness include the following. " + " ".join(facts[8:14]))
+            paragraphs.append(
+                "Additional points captured for completeness include the following. " + " ".join(facts[8:14])
+            )
     else:
         paragraphs.append(f"{openers[variant]} {visual_only[variant]}")
 
@@ -1297,7 +1459,7 @@ def _clean_title_fragment(text: str) -> str:
 
 def _looks_like_instruction(text: str) -> bool:
     """True when the text reads as a request to the tool rather than a subject name."""
-    words = [word for word in re.findall(r"[A-Za-z]+", text)]
+    words = list(re.findall(r"[A-Za-z]+", text))
     if not words:
         return True
     instruction_hits = len(_PROMPT_INSTRUCTION_RE.findall(text))
@@ -1484,6 +1646,12 @@ def _load_benchmark_snapshot() -> dict[str, object]:
         "summary": payload.get("summary", {}),
         "results": payload.get("results", []),
         "mode": payload.get("mode"),
+        "gate_status": payload.get("gate_status"),
+        "gate_checks": payload.get("gate_checks", []),
+        "threshold_version": payload.get("threshold_version"),
+        "case_count": payload.get("case_count"),
+        "advisory_case_ids": payload.get("advisory_case_ids", []),
+        "generated_at": payload.get("generated_at"),
         "updated_at": int(benchmark_report_path.stat().st_mtime),
     }
 
@@ -1542,11 +1710,14 @@ async def _extract_text_from_images(image_inputs: list[ImageInput]) -> list[str]
 
     vision_model = await _resolve_vision_model()
     if vision_model is None:
-        logger.info("vision_model_unavailable configured=%s candidates=%s", settings.vision_model, ", ".join(_vision_model_candidates()))
+        logger.info(
+            "vision_model_unavailable configured=%s candidates=%s",
+            settings.vision_model,
+            ", ".join(_vision_model_candidates()),
+        )
         return snippets
 
     for image, normalized in normalized_images:
-
         vision_prompt = (
             "Extract all readable text from the provided document image. "
             "Preserve section structure and bullet points when possible. "
@@ -1574,6 +1745,96 @@ async def _extract_text_from_images(image_inputs: list[ImageInput]) -> list[str]
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "env": settings.app_env}
+
+
+@app.get("/healthz", tags=["operations"])
+def healthz() -> dict[str, object]:
+    """Liveness probe.
+
+    Deliberately dependency-free: it answers "is this process able to serve?"
+    A failing dependency must never cause Kubernetes to restart the pod, which
+    is what would happen if liveness checked the LLM.
+    """
+    return {
+        "status": "ok",
+        "service": SERVICE_NAME,
+        "version": SERVICE_VERSION,
+        "uptime_seconds": round(time.time() - SERVICE_STARTED_AT, 3),
+    }
+
+
+@app.get("/readyz", tags=["operations"])
+async def readyz(response: Response) -> dict[str, object]:
+    """Readiness probe.
+
+    Checks the dependencies required to actually complete a compose request:
+    a writable artifact store and (optionally) a reachable LLM. Returns 503 when
+    the service should be pulled out of the load-balancer rotation.
+    """
+    checks: dict[str, dict[str, object]] = {}
+
+    artifact_dir = Path(settings.artifact_storage_dir)
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        probe = artifact_dir / ".readyz"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        checks["artifact_store"] = {"ok": True, "path": str(artifact_dir)}
+    except OSError as exc:
+        checks["artifact_store"] = {"ok": False, "path": str(artifact_dir), "error": str(exc)}
+
+    try:
+        installed = await _installed_model_names()
+        llm_reachable = bool(installed)
+        checks["llm_endpoint"] = {
+            "ok": llm_reachable or not settings.readiness_requires_llm,
+            "required": settings.readiness_requires_llm,
+            "base_url": settings.llm_base_url,
+            "installed_model_count": len(installed),
+            "configured_model_present": settings.llm_model in installed,
+        }
+    except Exception as exc:  # pragma: no cover - network failure shape varies
+        checks["llm_endpoint"] = {
+            "ok": not settings.readiness_requires_llm,
+            "required": settings.readiness_requires_llm,
+            "base_url": settings.llm_base_url,
+            "error": str(exc),
+        }
+
+    ready = all(bool(check["ok"]) for check in checks.values())
+    if not ready:
+        response.status_code = 503
+
+    return {"status": "ready" if ready else "not_ready", "checks": checks}
+
+
+@app.get("/version", tags=["operations"])
+def version() -> dict[str, object]:
+    """Build provenance so a running replica can be traced to an exact commit."""
+    return {
+        "service": SERVICE_NAME,
+        "version": SERVICE_VERSION,
+        "git_commit": settings.git_commit,
+        "build_time": settings.build_time,
+        "environment": settings.app_env,
+        "models": {
+            "fast": settings.llm_fast_model,
+            "default": settings.llm_default_model,
+            "strong": settings.llm_strong_model,
+            "vision": settings.vision_model,
+        },
+        "retrieval": {
+            "chunk_size_chars": settings.rag_chunk_size_chars,
+            "chunk_overlap_chars": settings.rag_chunk_overlap_chars,
+            "top_k_chunks": settings.rag_top_k_chunks,
+            "hybrid_embeddings": settings.rag_use_embeddings,
+        },
+        "limits": {
+            "max_input_chars": settings.max_input_chars,
+            "max_request_bytes": settings.max_request_bytes,
+            "rate_limit_requests_per_minute": settings.rate_limit_requests_per_minute,
+        },
+    }
 
 
 @app.get("/capabilities")
@@ -1654,7 +1915,7 @@ async def _compose_document(req: ComposeRequest, ctx: RequestContext) -> Compose
     raw_source = req.source_text.strip()
     workspace_context = ""
     workspace_sources: list[str] = []
-    retrieval_stats: dict[str, int | float | bool] = {}
+    retrieval_stats: dict[str, str | int | float | bool] = {}
     workspace_image_inputs: list[ImageInput] = []
     relevant_workspace_files = []
     slide_records: list = []
@@ -1712,7 +1973,9 @@ async def _compose_document(req: ComposeRequest, ctx: RequestContext) -> Compose
         image_text_snippets = await _extract_text_from_images(all_image_inputs)
     image_context = "\n\n".join(image_text_snippets)
 
-    effective_prompt, effective_objective, effective_instructions = _professional_authoring_brief(req, workspace_sources)
+    effective_prompt, effective_objective, effective_instructions = _professional_authoring_brief(
+        req, workspace_sources
+    )
     instructions_text = "\n".join(f"- {item}" for item in effective_instructions if item.strip())
     extraction_latency_ms = stopwatch.lap_ms()
 
@@ -1999,9 +2262,7 @@ def _record_compose_metrics(
                 figures_extracted=figures_extracted,
                 figures_embedded=int(structure["figures_embedded"]),
                 figure_retention_rate=(
-                    round(int(structure["figures_embedded"]) / figures_extracted, 4)
-                    if figures_extracted
-                    else 0.0
+                    round(int(structure["figures_embedded"]) / figures_extracted, 4) if figures_extracted else 0.0
                 ),
                 figures_suppressed=suppressed,
                 triage_breakdown=breakdown,
@@ -2034,11 +2295,19 @@ def _record_compose_metrics(
         logger.debug("metrics capture skipped", exc_info=True)
 
 
-@app.get("/metrics")
+@app.get("/metrics", tags=["operations"])
 async def metrics(format: str = "json"):
-    """Expose aggregated service-level KPIs for dashboards and scrapers."""
+    """Expose aggregated service-level KPIs for dashboards and scrapers.
+
+    ``format=prometheus`` returns the OpenMetrics text exposition with the exact
+    content type Prometheus requires; anything else returns the JSON snapshot
+    consumed by the built-in UI dashboard.
+    """
     if format.lower() == "prometheus":
-        return PlainTextResponse(metrics_registry.prometheus())
+        return PlainTextResponse(
+            metrics_registry.prometheus(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
     return metrics_registry.snapshot()
 
 

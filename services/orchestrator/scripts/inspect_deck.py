@@ -1,4 +1,5 @@
 """Introspect the real deck so restructuring decisions are grounded in actual content."""
+
 from __future__ import annotations
 
 import re

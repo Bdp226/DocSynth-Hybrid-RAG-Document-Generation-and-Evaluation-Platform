@@ -8,14 +8,16 @@ content-fidelity guarantees without altering synthesis behaviour or performance.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import threading
 import time
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 # Bounded in-memory window keeps /metrics O(1) in storage and avoids unbounded growth.
 _MAX_RETAINED_RUNS = 500
@@ -224,9 +226,7 @@ class MetricsRegistry:
             },
             "content_integrity": {
                 "total_leaks_detected": total_leaks,
-                "clean_document_rate": _ratio(
-                    sum(1 for run in runs if run.content_integrity_pass), len(runs)
-                ),
+                "clean_document_rate": _ratio(sum(1 for run in runs if run.content_integrity_pass), len(runs)),
             },
         }
 
@@ -236,7 +236,7 @@ class MetricsRegistry:
         lines: list[str] = []
 
         def emit(name: str, value: Any, help_text: str) -> None:
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
+            if not isinstance(value, int | float) or isinstance(value, bool):
                 return
             lines.append(f"# HELP {name} {help_text}")
             lines.append(f"# TYPE {name} gauge")
@@ -295,7 +295,9 @@ def compute_genai_quality_metrics(
     leakage_rate = _clamp01(total_leaks / max(1, max(topics, llm_topics, output_chars // 200)))
     schema_compliance_rate = 1.0 if content_integrity_pass else 0.75
 
-    tokens_used = max(250, int(output_chars * 1.65 + max(topics, llm_topics) * 85 + max(0.0, retrieval_latency_ms) * 0.5))
+    tokens_used = max(
+        250, int(output_chars * 1.65 + max(topics, llm_topics) * 85 + max(0.0, retrieval_latency_ms) * 0.5)
+    )
     cost_usd = round(tokens_used / 1_000 * 0.0032, 6)
 
     return {
@@ -379,19 +381,13 @@ image_triage = _ImageTriageCounters()
 
 def record_image_verdict(verdict: Any) -> None:
     """Record a triage verdict. Never raises, so extraction is unaffected."""
-    try:
+    with contextlib.suppress(Exception):
         image_triage.record(str(verdict.category), bool(verdict.include))
-    except Exception:
-        pass
 
 
 def triage_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
     """Counts attributable to a single run."""
-    return {
-        key: after[key] - before.get(key, 0)
-        for key in after
-        if after[key] - before.get(key, 0) > 0
-    }
+    return {key: after[key] - before.get(key, 0) for key in after if after[key] - before.get(key, 0) > 0}
 
 
 class Stopwatch:

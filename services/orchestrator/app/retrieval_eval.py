@@ -81,7 +81,7 @@ def evaluate(rankings: list[list[int]], queries: list[EvalQuery]) -> RetrievalMe
         return RetrievalMetrics(0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     totals = {"r1": 0.0, "r5": 0.0, "r10": 0.0, "mrr": 0.0, "ndcg": 0.0}
-    for ranked_ids, query in zip(rankings, queries):
+    for ranked_ids, query in zip(rankings, queries, strict=False):
         totals["r1"] += recall_at_k(ranked_ids, query.relevant_doc_id, 1)
         totals["r5"] += recall_at_k(ranked_ids, query.relevant_doc_id, 5)
         totals["r10"] += recall_at_k(ranked_ids, query.relevant_doc_id, 10)
@@ -138,8 +138,6 @@ def build_known_item_queries(
             continue
         # Highest IDF first; ties broken alphabetically for determinism.
         candidates.sort(key=lambda t: (-index.idf(t), t))
-        queries.append(
-            EvalQuery(query=" ".join(candidates[:terms_per_query]), relevant_doc_id=doc_id)
-        )
+        queries.append(EvalQuery(query=" ".join(candidates[:terms_per_query]), relevant_doc_id=doc_id))
 
     return queries

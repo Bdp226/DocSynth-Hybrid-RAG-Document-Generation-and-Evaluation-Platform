@@ -1,16 +1,144 @@
 [
   {
-    "case_id": "case-1",
-    "prompt": "Create a short executive summary",
-    "source_text": "The project completed phase one with minor schedule variance.",
+    "case_id": "exec-summary-basic",
+    "category": "executive_summary",
+    "difficulty": "easy",
+    "prompt": "Create a short executive summary of the programme status.",
+    "source_text": "The project completed phase one with a minor schedule variance of four days. Budget consumption is at 38 percent against a 40 percent plan. Two integration risks remain open; the agreed mitigation is a weekly vendor sync, and both risks have owners assigned.",
     "instructions": ["Use headings", "Include risks and mitigations"],
-    "must_include": ["Risk", "Mitigation"]
+    "must_include": ["Risk", "Mitigation", "phase one"],
+    "must_not_include": ["Slide", "TODO", "As an AI"],
+    "max_words": 400
   },
   {
-    "case_id": "case-2",
-    "prompt": "Draft a concise status report",
-    "source_text": "Team resolved 8 defects and deferred 2 low-severity issues.",
-    "instructions": ["Keep under 120 words", "Use bullet points"],
-    "must_include": ["defects", "issues"]
+    "case_id": "status-report-concise",
+    "category": "status_report",
+    "difficulty": "easy",
+    "prompt": "Draft a concise engineering status report.",
+    "source_text": "The team resolved 8 defects this sprint and deferred 2 low-severity issues to the next release. Test automation coverage rose from 61 percent to 74 percent. One dependency upgrade is blocked on a vendor patch.",
+    "instructions": ["Keep it tight", "Use bullet points"],
+    "must_include": ["defects", "issues", "coverage"],
+    "must_not_include": ["Slide", "Lorem ipsum"],
+    "max_words": 300
+  },
+  {
+    "case_id": "procedure-runbook",
+    "category": "procedure",
+    "difficulty": "medium",
+    "prompt": "Write an operational runbook for restoring the ingestion service.",
+    "source_text": "Restoration requires: stop the ingestion workers, drain the queue, restore the last good snapshot from object storage, replay the write-ahead log, then restart workers one availability zone at a time. Validate by confirming queue depth returns to zero within fifteen minutes.",
+    "instructions": ["Number every step", "State the validation criteria"],
+    "must_include": ["drain", "snapshot", "replay", "validate"],
+    "must_not_include": ["Slide", "As an AI"],
+    "requires_ordered_steps": true,
+    "requires_generation": true,
+    "max_words": 600
+  },
+  {
+    "case_id": "risk-register",
+    "category": "risk_register",
+    "difficulty": "medium",
+    "prompt": "Produce a risk register section with severity and owner for each risk.",
+    "source_text": "Risk 1: vendor API rate limits may throttle peak ingestion, severity high, owner platform team, mitigation is request batching. Risk 2: the embedding model licence renews in March, severity medium, owner legal, mitigation is an early renewal request. Risk 3: on-call coverage has a single point of failure, severity medium, owner SRE, mitigation is a secondary rota.",
+    "instructions": ["Present the risks clearly", "One entry per risk"],
+    "must_include": ["severity", "owner", "mitigation", "rate limits"],
+    "must_not_include": ["Slide", "unknown owner"],
+    "max_words": 500
+  },
+  {
+    "case_id": "multi-source-synthesis",
+    "category": "synthesis",
+    "difficulty": "hard",
+    "prompt": "Synthesise the platform, security, and cost inputs into one coherent architecture briefing.",
+    "source_text": "Platform input: the orchestrator runs three replicas behind an ingress with horizontal autoscaling on CPU. Security input: all identity is asserted via signed headers at the gateway and artifacts are owner-scoped. Cost input: the local inference tier removes per-token vendor spend but adds a fixed GPU node cost of roughly 900 dollars per month.",
+    "instructions": ["Cover all three inputs", "Draw an explicit conclusion"],
+    "must_include": ["replicas", "identity", "cost", "autoscaling"],
+    "must_not_include": ["Slide", "I cannot"],
+    "max_words": 700
+  },
+  {
+    "case_id": "compliance-redaction",
+    "category": "compliance",
+    "difficulty": "hard",
+    "prompt": "Summarise the incident without reproducing any personal data.",
+    "source_text": "An operator account belonging to jane.doe@contoso.com with contact number 555-0142 triggered a bulk export at 02:14 UTC. The export contained 12,000 customer records. Access was revoked within nine minutes and the records were never transmitted externally.",
+    "instructions": ["Redact all personal identifiers", "State the containment timeline"],
+    "must_include": ["export", "revoked"],
+    "must_not_include": ["jane.doe@contoso.com", "555-0142"],
+    "expects_policy_flags": true,
+    "requires_generation": true,
+    "max_words": 350
+  },
+  {
+    "case_id": "grounding-strict",
+    "category": "grounding",
+    "difficulty": "hard",
+    "prompt": "Report only the metrics that appear in the source. Do not estimate anything.",
+    "source_text": "Throughput measured at 42 documents per minute. Median latency measured at 1.8 seconds. No figures were captured for memory usage or error rate during this test window.",
+    "instructions": ["Only use measured values", "Explicitly note unmeasured metrics"],
+    "must_include": ["42", "1.8"],
+    "must_not_include": ["approximately 99", "estimated error rate"],
+    "max_words": 300
+  },
+  {
+    "case_id": "adversarial-unanswerable",
+    "category": "hallucination_probe",
+    "difficulty": "hard",
+    "prompt": "What was the Q4 revenue attributed to this platform?",
+    "source_text": "This document covers the technical rollout plan for the ingestion service. It contains no financial information of any kind.",
+    "instructions": ["Answer only from the source", "Say so if the source does not contain the answer"],
+    "must_include": ["no financial information"],
+    "must_not_include": ["revenue was", "million in Q4"],
+    "expects_refusal": true,
+    "requires_generation": true,
+    "max_words": 250
+  },
+  {
+    "case_id": "table-extraction",
+    "category": "structure",
+    "difficulty": "medium",
+    "prompt": "Convert the throughput measurements into a comparison table.",
+    "source_text": "Baseline configuration processed 18 documents per minute at 4.2 seconds median latency. Tuned configuration processed 42 documents per minute at 1.8 seconds median latency. Cached configuration processed 61 documents per minute at 1.1 seconds median latency.",
+    "instructions": ["Use a table with one row per configuration", "Include both metrics"],
+    "must_include": ["Baseline", "Tuned", "Cached", "latency"],
+    "must_not_include": ["Slide"],
+    "requires_table": true,
+    "requires_generation": true,
+    "max_words": 350
+  },
+  {
+    "case_id": "long-form-dossier",
+    "category": "long_form",
+    "difficulty": "hard",
+    "prompt": "Produce a detailed reference dossier for the ingestion platform.",
+    "source_text": "The ingestion platform accepts slide decks, PDFs, and workspace documents. It normalises them into chunked text with slide-accurate figure extraction, then retrieval ranks those chunks with a hybrid BM25 and embedding scorer to assemble a grounded context window. Generation is routed to a fast, default, or strong model depending on the requested detail level. Rendering emits PDF and DOCX with captions and tables. Every run emits a telemetry record with more than fifty KPIs.",
+    "instructions": ["Cover ingestion, retrieval, generation, rendering, telemetry", "Use section headings"],
+    "must_include": ["ingestion", "retrieval", "generation", "rendering", "telemetry"],
+    "must_not_include": ["Slide 1", "As an AI"],
+    "min_words": 60,
+    "max_words": 2000
+  },
+  {
+    "case_id": "instruction-following-limits",
+    "category": "instruction_following",
+    "difficulty": "medium",
+    "prompt": "Summarise the release in no more than one hundred words.",
+    "source_text": "Release 4.2 shipped hybrid retrieval, per-slide figure extraction, disk-backed prompt caching, and an owner-scoped artifact download endpoint. Two known issues remain: DOCX caption spacing and a slow cold start on the first vision call.",
+    "instructions": ["Hard limit of one hundred words", "Mention the known issues"],
+    "must_include": ["hybrid retrieval", "known issues"],
+    "must_not_include": ["Slide"],
+    "max_words": 400
+  },
+  {
+    "case_id": "leakage-clean-output",
+    "category": "integrity",
+    "difficulty": "medium",
+    "prompt": "Turn these meeting notes into a publication-ready summary.",
+    "source_text": "Slide 14 shows the architecture. Priya said she would follow up. Action item on slide 15. The substantive point is that the cache reduced repeat generation latency by 63 percent.",
+    "instructions": ["Remove all presentation and meeting artefacts", "Keep the substantive finding"],
+    "must_include": ["cache", "63"],
+    "must_not_include": ["Slide 14", "Slide 15", "Priya said"],
+    "requires_generation": true,
+    "max_words": 300
   }
 ]

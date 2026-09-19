@@ -16,8 +16,9 @@ of the source resolution.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from io import BytesIO
+from typing import Any
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -148,15 +149,7 @@ def _skin_stats(rgb: Image.Image) -> tuple[float, int]:
     r, g, b = data[..., 0], data[..., 1], data[..., 2]
     peak = data.max(axis=-1)
     trough = data.min(axis=-1)
-    mask = (
-        (r > 95)
-        & (g > 40)
-        & (b > 20)
-        & ((peak - trough) > 15)
-        & (np.abs(r - g) > 15)
-        & (r > g)
-        & (r > b)
-    )
+    mask = (r > 95) & (g > 40) & (b > 20) & ((peak - trough) > 15) & (np.abs(r - g) > 15) & (r > g) & (r > b)
     ratio = float(np.count_nonzero(mask) / mask.size)
     if not np.any(mask):
         return ratio, 0
@@ -178,10 +171,10 @@ def assess_image(blob: bytes, *, exclude_person_photos: bool = True) -> ImageAss
     """Classify an asset and decide whether it belongs in a published document."""
     try:
         with Image.open(BytesIO(blob)) as opened:
-            opened = ImageOps.exif_transpose(opened)
-            width, height = int(opened.width), int(opened.height)
-            transparency = _transparency_ratio(opened)
-            flat = _flatten_to_rgb(opened)
+            oriented = ImageOps.exif_transpose(opened) or opened
+            width, height = int(oriented.width), int(oriented.height)
+            transparency = _transparency_ratio(oriented)
+            flat = _flatten_to_rgb(oriented)
             detail_source = _center_crop(flat)
             thumb = flat.copy()
             thumb.thumbnail((_THUMBNAIL_EDGE, _THUMBNAIL_EDGE))
@@ -193,14 +186,22 @@ def assess_image(blob: bytes, *, exclude_person_photos: bool = True) -> ImageAss
 
     if min(width, height) < MIN_DIMENSION_PX or (width * height) < MIN_AREA_PX:
         return ImageAssessment(
-            False, "icon", "below the legible size threshold", width, height,
+            False,
+            "icon",
+            "below the legible size threshold",
+            width,
+            height,
             transparency_ratio=transparency,
         )
 
     aspect = width / height
     if aspect > MAX_ASPECT_RATIO or aspect < (1.0 / MAX_ASPECT_RATIO):
         return ImageAssessment(
-            False, "banner", "extreme aspect ratio indicates a rule or spacer", width, height,
+            False,
+            "banner",
+            "extreme aspect ratio indicates a rule or spacer",
+            width,
+            height,
             transparency_ratio=transparency,
         )
 
@@ -208,7 +209,7 @@ def assess_image(blob: bytes, *, exclude_person_photos: bool = True) -> ImageAss
     colors = _unique_colors(thumb)
     skin, skin_variety = _skin_stats(thumb)
 
-    features = {
+    features: dict[str, Any] = {
         "width_px": width,
         "height_px": height,
         "detail_score": round(detail, 4),
@@ -226,9 +227,7 @@ def assess_image(blob: bytes, *, exclude_person_photos: bool = True) -> ImageAss
         and PORTRAIT_MIN_ASPECT <= aspect <= PORTRAIT_MAX_ASPECT
         and detail < DIAGRAM_MIN_DETAIL
     ):
-        return ImageAssessment(
-            False, "portrait", "personal photograph withheld under the privacy policy", **features
-        )
+        return ImageAssessment(False, "portrait", "personal photograph withheld under the privacy policy", **features)
 
     is_flat = colors <= DECORATIVE_MAX_COLORS or transparency >= DECORATIVE_MIN_TRANSPARENCY
     if is_flat and detail < DECORATIVE_MAX_DETAIL:

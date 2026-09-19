@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 from app import main
 from app.config import settings
 
-
 client = TestClient(main.app)
 
 
@@ -25,8 +24,7 @@ def _headers(user_id: str = "user-001", role: str = "author") -> dict[str, str]:
 def test_document_title_never_echoes_the_prompt_or_slide_range() -> None:
     req = SimpleNamespace(
         user_prompt=(
-            "Describe in professional way the full doc as per ppt slides and give "
-            "from slide 81-144 and with images"
+            "Describe in professional way the full doc as per ppt slides and give " "from slide 81-144 and with images"
         ),
         objective="Produce complete publication-ready documentation from the deck",
         domain="enterprise platform",
@@ -308,18 +306,23 @@ Random talkative conversation??
                 text="Key risks include approval lead times, infrastructure dependencies, and security review delays, each requiring explicit mitigation tracking.",
             ),
         ]
-        return "workspace context", ["sandbox.pdf"], chunks, SimpleNamespace(
-            candidate_files=1,
-            selected_files=1,
-            chunks_scored=4,
-            returned_chunks=4,
-            cache_hits=0,
-            cache_misses=1,
-            context_chars=400,
-            retrieval_latency_ms=5,
-            top_score=0.91,
-            avg_top_score=0.8725,
-            used_embeddings=False,
+        return (
+            "workspace context",
+            ["sandbox.pdf"],
+            chunks,
+            SimpleNamespace(
+                candidate_files=1,
+                selected_files=1,
+                chunks_scored=4,
+                returned_chunks=4,
+                cache_hits=0,
+                cache_misses=1,
+                context_chars=400,
+                retrieval_latency_ms=5,
+                top_score=0.91,
+                avg_top_score=0.8725,
+                used_embeddings=False,
+            ),
         )
 
     monkeypatch.setattr(main, "_generate_with_llm", fake_generate)
@@ -363,18 +366,23 @@ def test_compose_includes_workspace_ppt_images(tmp_path: Path, monkeypatch) -> N
         return "# Structured Document\n\n## Executive Overview\n\nFormal content"
 
     def fake_build_workspace_context(*args, **kwargs):
-        return "workspace context", ["deck.pptx"], [], SimpleNamespace(
-            candidate_files=1,
-            selected_files=1,
-            chunks_scored=0,
-            returned_chunks=0,
-            cache_hits=0,
-            cache_misses=1,
-            context_chars=20,
-            retrieval_latency_ms=5,
-            top_score=0.0,
-            avg_top_score=0.0,
-            used_embeddings=False,
+        return (
+            "workspace context",
+            ["deck.pptx"],
+            [],
+            SimpleNamespace(
+                candidate_files=1,
+                selected_files=1,
+                chunks_scored=0,
+                returned_chunks=0,
+                cache_hits=0,
+                cache_misses=1,
+                context_chars=20,
+                retrieval_latency_ms=5,
+                top_score=0.0,
+                avg_top_score=0.0,
+                used_embeddings=False,
+            ),
         )
 
     def fake_extract_workspace_images_from_paths(*args, **kwargs):
@@ -603,6 +611,7 @@ def test_generate_with_llm_short_circuits_missing_vision_model(tmp_path: Path, m
     monkeypatch.setattr(main, "_model_availability_cache", {})
     monkeypatch.setattr(main, "_installed_models_cache", None)
     monkeypatch.setattr(main.app.state, "http_client", fake_client, raising=False)
+
     async def fake_installed_models(force_refresh: bool = False):
         return {settings.llm_model}
 

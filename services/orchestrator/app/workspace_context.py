@@ -2,23 +2,21 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import math
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from docx import Document
-from pypdf import PdfReader
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pypdf import PdfReader
 
 from .image_intelligence import assess_image
 from .models import ImageInput
 from .retrieval import BM25Index, reciprocal_rank_fusion
 from .telemetry import record_image_verdict
-
 
 SUPPORTED_SUFFIXES = {".md", ".txt", ".docx", ".pdf", ".pptx"}
 
@@ -49,13 +47,67 @@ _ROLE_PAREN_RE = re.compile(
 _PERSON_NAME_RE = re.compile(r"\b[A-Z][a-z]{2,}\s+[A-Z][a-zA-Z]{1,}\b")
 # Title-case domain phrases look like names; these words mark a match as non-personal.
 _NON_NAME_WORDS = {
-    "access", "agent", "agents", "api", "architecture", "atlas", "budget", "cloud", "code", "compliance",
-    "cost", "crew", "dashboard", "dashboards", "data", "design", "effort", "environment", "estimation",
-    "evaluation", "flow", "gateway", "governance", "hub", "infrastructure", "machine", "management",
-    "meeting", "model", "network", "onboarding", "overview", "phase", "pilot", "plan", "platform",
-    "process", "project", "release", "report", "review", "risk", "sandbox", "security", "server",
-    "service", "services", "setup", "solution", "status", "summary", "system", "team", "test",
-    "testing", "tool", "tools", "update", "vendor", "version", "virtual",
+    "access",
+    "agent",
+    "agents",
+    "api",
+    "architecture",
+    "atlas",
+    "budget",
+    "cloud",
+    "code",
+    "compliance",
+    "cost",
+    "crew",
+    "dashboard",
+    "dashboards",
+    "data",
+    "design",
+    "effort",
+    "environment",
+    "estimation",
+    "evaluation",
+    "flow",
+    "gateway",
+    "governance",
+    "hub",
+    "infrastructure",
+    "machine",
+    "management",
+    "meeting",
+    "model",
+    "network",
+    "onboarding",
+    "overview",
+    "phase",
+    "pilot",
+    "plan",
+    "platform",
+    "process",
+    "project",
+    "release",
+    "report",
+    "review",
+    "risk",
+    "sandbox",
+    "security",
+    "server",
+    "service",
+    "services",
+    "setup",
+    "solution",
+    "status",
+    "summary",
+    "system",
+    "team",
+    "test",
+    "testing",
+    "tool",
+    "tools",
+    "update",
+    "vendor",
+    "version",
+    "virtual",
 }
 # Chatter is a named participant plus a reporting verb, not the verb on its own.
 _MEETING_CHATTER_RE = re.compile(
@@ -145,9 +197,7 @@ def _looks_like_noise_line(line: str) -> bool:
         return True
     if stripped.count("?") >= 2:
         return True
-    if len(_tokenize(stripped)) == 0 and not re.search(r"\d", stripped):
-        return True
-    return False
+    return bool(len(_tokenize(stripped)) == 0 and not re.search("\\d", stripped))
 
 
 def _clean_extracted_text(text: str) -> str:
@@ -368,7 +418,7 @@ def _slide_images(
         if len(blob) < min_image_bytes:
             continue
 
-        digest = hashlib.sha1(blob).hexdigest()
+        digest = hashlib.sha1(blob, usedforsecurity=False).hexdigest()
         if digest in seen_hashes:
             continue
         seen_hashes.add(digest)
@@ -481,7 +531,7 @@ def _extract_pptx_images(
     images: list[ImageInput] = []
     for record in records:
         for image in record.images:
-            digest = hashlib.sha1(base64.b64decode(image.content_base64)).hexdigest()
+            digest = hashlib.sha1(base64.b64decode(image.content_base64), usedforsecurity=False).hexdigest()
             seen_hashes.add(digest)
             images.append(image)
             if len(images) >= max_images:
@@ -504,12 +554,12 @@ def _extract_pdf_images(path: Path, max_images: int, seen_hashes: set[str]) -> l
             blob = getattr(img_obj, "data", None)
             if not blob or len(blob) < 8000:
                 continue
-            digest = hashlib.sha1(blob).hexdigest()
+            digest = hashlib.sha1(blob, usedforsecurity=False).hexdigest()
             if digest in seen_hashes:
                 continue
             seen_hashes.add(digest)
             image_index += 1
-            name = getattr(img_obj, "name", "") or img_name
+            name = str(getattr(img_obj, "name", "") or img_name)
             ext = name.split(".")[-1].lower() if "." in name else "png"
             if ext not in ("png", "jpg", "jpeg", "webp"):
                 ext = "png"
@@ -687,7 +737,9 @@ def _pairwise_token_overlap(left: str, right: str) -> float:
     return intersection / union if union else 0.0
 
 
-def _select_diverse_top_chunks(items: list[RetrievedChunk], top_k: int, diversity_lambda: float = 0.82) -> list[RetrievedChunk]:
+def _select_diverse_top_chunks(
+    items: list[RetrievedChunk], top_k: int, diversity_lambda: float = 0.82
+) -> list[RetrievedChunk]:
     if len(items) <= top_k:
         return sorted(items, key=lambda x: x.score, reverse=True)
 
@@ -744,18 +796,23 @@ def build_workspace_context(
             raw_chunks.append((f"{path.name}#c{idx+1}", chunk))
 
     if not raw_chunks:
-        return "", [], [], RetrievalStats(
-            candidate_files=len(candidates),
-            selected_files=len(selected),
-            chunks_scored=0,
-            returned_chunks=0,
-            cache_hits=cache_hits,
-            cache_misses=cache_misses,
-            context_chars=0,
-            retrieval_latency_ms=int((time.perf_counter() - start) * 1000),
-            top_score=0.0,
-            avg_top_score=0.0,
-            used_embeddings=use_embeddings,
+        return (
+            "",
+            [],
+            [],
+            RetrievalStats(
+                candidate_files=len(candidates),
+                selected_files=len(selected),
+                chunks_scored=0,
+                returned_chunks=0,
+                cache_hits=cache_hits,
+                cache_misses=cache_misses,
+                context_chars=0,
+                retrieval_latency_ms=int((time.perf_counter() - start) * 1000),
+                top_score=0.0,
+                avg_top_score=0.0,
+                used_embeddings=use_embeddings,
+            ),
         )
 
     chunk_texts = [t for _, t in raw_chunks]

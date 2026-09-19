@@ -1,0 +1,51 @@
+{
+  "_comment": [
+    "Quality gates for the DocSynth generation pipeline.",
+    "A pull request that pushes any KPI outside these bounds fails CI even when every unit test passes.",
+    "Thresholds are versioned deliberately: raising a floor is a reviewed change with a changelog entry.",
+    "Metric definitions live in docs/evaluation-framework.md."
+  ],
+  "version": "1.0.0",
+  "updated": "2026-09-19",
+  "gates": {
+    "pass_rate": {
+      "min": 1.0,
+      "rationale": "Any case that errors is a functional regression, not a quality regression."
+    },
+    "avg_must_include_coverage": {
+      "min": 0.85,
+      "rationale": "Required facts from the source must survive synthesis. Below 0.85 the output starts dropping material the author explicitly asked for."
+    },
+    "min_case_must_include_coverage": {
+      "min": 0.5,
+      "rationale": "Guards against a single catastrophic case hiding behind a good average."
+    },
+    "forbidden_term_rate": {
+      "max": 0.0,
+      "rationale": "Leaked PII, slide references, and meeting chatter are release blockers, not quality trade-offs."
+    },
+    "structure_compliance_rate": {
+      "min": 0.9,
+      "rationale": "Ordered steps, tables, and headings are requested explicitly; ignoring them breaks downstream rendering."
+    },
+    "length_compliance_rate": {
+      "min": 0.9,
+      "rationale": "Instruction following is measurable. Runaway length is the most common silent quality failure."
+    },
+    "refusal_accuracy": {
+      "min": 1.0,
+      "rationale": "Unanswerable prompts must be declined. A confident fabrication here is the worst possible failure mode."
+    },
+    "p95_latency_ms": {
+      "max": 120000,
+      "rationale": "Aligned with the generation SLO in docs/slo-and-observability.md."
+    }
+  },
+  "regression_tolerance": {
+    "_comment": "Allowed drop versus the committed baseline before a run is flagged as a regression.",
+    "avg_must_include_coverage": 0.03,
+    "structure_compliance_rate": 0.05,
+    "length_compliance_rate": 0.05,
+    "p95_latency_ms_pct": 0.25
+  }
+}

@@ -5,9 +5,7 @@ from docx import Document as DocxDocument
 from app.document_builder import generate_artifacts
 from app.models import ImageInput
 
-ONE_PIXEL_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-)
+ONE_PIXEL_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
 
 def test_generate_artifacts_builds_pdf_and_docx() -> None:
@@ -105,4 +103,3 @@ def test_markdown_tables_render_as_real_tables() -> None:
     assert "---" not in body_text
     assert "| Item |" not in body_text
     assert len(pdf_artifact.content) > 0
-

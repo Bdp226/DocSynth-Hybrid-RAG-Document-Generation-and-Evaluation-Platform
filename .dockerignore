@@ -1,0 +1,47 @@
+# Version control
+.git
+.github
+.gitignore
+
+# Virtual environments
+.venv
+venv
+ENV
+env
+
+# Python caches
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Build + generated artifacts
+services/orchestrator/build
+build
+dist
+*.pdf
+*.docx
+*.pptx
+*.png
+*.jpg
+*.jpeg
+
+# Local secrets
+.env
+*.local
+
+# Docs and non-runtime assets
+docs
+examples
+deploy
+pipelines/eval/last_eval_report.json
+*.md
+!README.md
+
+# Editor
+.vscode
+.idea

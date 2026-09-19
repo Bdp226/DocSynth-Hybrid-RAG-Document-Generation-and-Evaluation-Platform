@@ -1,0 +1,33 @@
+{
+  "title": "Ingestion Platform - Technical Reference",
+  "input_chars": 700,
+  "output_chars": 1667,
+  "artifacts": [
+    {
+      "format": "pdf",
+      "file": "sample-technical-reference.pdf",
+      "bytes": 4460
+    },
+    {
+      "format": "docx",
+      "file": "sample-technical-reference.docx",
+      "bytes": 38365
+    }
+  ],
+  "structure": {
+    "parts": 0,
+    "procedure_steps": 0,
+    "topics": 0,
+    "tables_rendered": 1,
+    "table_rows": 3,
+    "figures_embedded": 0,
+    "output_chars": 1667,
+    "leak_counts": {
+      "slide_reference": 0,
+      "roster_role": 0,
+      "meeting_chatter": 0,
+      "raw_bold_marker": 0
+    },
+    "content_integrity_pass": true
+  }
+}

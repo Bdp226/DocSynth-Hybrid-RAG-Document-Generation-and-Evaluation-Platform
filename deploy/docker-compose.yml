@@ -2,15 +2,29 @@ services:
   orchestrator:
     build:
       context: ../services/orchestrator
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-local}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     env_file:
       - ../.env.example
     environment:
       - UVICORN_WORKERS=2
-      - ARTIFACT_STORAGE_DIR=/tmp/doc_optimizer_artifacts
+      - ARTIFACT_STORAGE_DIR=/var/lib/docsynth/artifacts
+      - LLM_BASE_URL=http://llm:11434
+      - QDRANT_URL=http://qdrant:6333
     ports:
       - "8080:8080"
     volumes:
-      - orchestrator_artifacts:/tmp/doc_optimizer_artifacts
+      - orchestrator_artifacts:/var/lib/docsynth/artifacts
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - qdrant
       - llm
@@ -21,6 +35,7 @@ services:
       - "6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
+    restart: unless-stopped
 
   llm:
     image: ollama/ollama:0.4.7
@@ -28,6 +43,7 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    restart: unless-stopped
 
 volumes:
   qdrant_data:

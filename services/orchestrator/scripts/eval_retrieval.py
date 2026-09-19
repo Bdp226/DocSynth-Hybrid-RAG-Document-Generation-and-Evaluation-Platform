@@ -7,16 +7,15 @@ Run from services/orchestrator:
 from __future__ import annotations
 
 import math
-import re
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.retrieval import BM25Index, reciprocal_rank_fusion, tokenize  # noqa: E402
-from app.retrieval_eval import build_known_item_queries, evaluate  # noqa: E402
-from app.workspace_context import _chunk_text, _read_document_text_cached, _tokenize  # noqa: E402
+from app.retrieval import BM25Index, reciprocal_rank_fusion
+from app.retrieval_eval import build_known_item_queries, evaluate
+from app.workspace_context import _chunk_text, _read_document_text_cached, _tokenize
 
 
 def _legacy_idf(chunks: list[str], token: str) -> float:

@@ -12,22 +12,47 @@ spec:
     metadata:
       labels:
         app: orchestrator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8080"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: orchestrator
         image: doc-optimizer-orchestrator:latest
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
         env:
         - name: UVICORN_WORKERS
           value: "4"
+        - name: ARTIFACT_STORAGE_DIR
+          value: /var/lib/docsynth/artifacts
+        - name: READINESS_REQUIRES_LLM
+          value: "true"
         envFrom:
         - configMapRef:
             name: orchestrator-config
         ports:
-        - containerPort: 8080
+        - name: http
+          containerPort: 8080
         volumeMounts:
         - name: artifacts
-          mountPath: /tmp/doc_optimizer_artifacts
+          mountPath: /var/lib/docsynth/artifacts
+        - name: tmp
+          mountPath: /tmp
+        - name: app-build
+          mountPath: /app/build
         resources:
           requests:
             cpu: "250m"
@@ -35,20 +60,44 @@ spec:
           limits:
             cpu: "2"
             memory: "2Gi"
+        # Startup probe absorbs cold-start model discovery so a slow first boot
+        # never trips the liveness probe into a restart loop.
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          failureThreshold: 30
+          periodSeconds: 5
+        # Readiness checks real dependencies and pulls the pod out of rotation.
         readinessProbe:
           httpGet:
-            path: /health
-            port: 8080
-          initialDelaySeconds: 10
-          periodSeconds: 5
+            path: /readyz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        # Liveness is dependency-free on purpose: a failing LLM must not cause
+        # a pod restart, only a readiness failure.
         livenessProbe:
           httpGet:
-            path: /health
-            port: 8080
+            path: /healthz
+            port: http
           initialDelaySeconds: 20
-          periodSeconds: 10
+          periodSeconds: 15
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              # Let in-flight compose requests drain before the pod terminates.
+              command: ["sh", "-c", "sleep 15"]
+      terminationGracePeriodSeconds: 60
       volumes:
       - name: artifacts
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      - name: app-build
         emptyDir: {}
 ---
 apiVersion: v1
@@ -60,5 +109,6 @@ spec:
   selector:
     app: orchestrator
   ports:
-  - port: 8080
-    targetPort: 8080
+  - name: http
+    port: 8080
+    targetPort: http

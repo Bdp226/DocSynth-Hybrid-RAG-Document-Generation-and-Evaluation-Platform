@@ -59,7 +59,9 @@ def main_check() -> None:
     pages_with_images = sum(1 for page in reader.pages if page.images)
     embedded_images = sum(len(page.images) for page in reader.pages)
     first_image_page = next((index + 1 for index, page in enumerate(reader.pages) if page.images), None)
-    last_image_page = next((len(reader.pages) - index for index, page in enumerate(reversed(reader.pages)) if page.images), None)
+    last_image_page = next(
+        (len(reader.pages) - index for index, page in enumerate(reversed(reader.pages)) if page.images), None
+    )
 
     out_dir = Path(__file__).resolve().parents[1] / "build"
     out_dir.mkdir(exist_ok=True)

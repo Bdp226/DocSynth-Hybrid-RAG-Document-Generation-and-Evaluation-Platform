@@ -8,8 +8,17 @@ on:
   schedule:
     - cron: '0 6 * * 1'
 
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   dependency-audit:
+    name: dependency audit
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -24,14 +33,70 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
+          cache-dependency-path: services/orchestrator/requirements-dev.txt
 
       - name: Install audit tools
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt pip-audit bandit
+          pip install -r requirements-dev.txt
 
-      - name: Run dependency audit
-        run: pip-audit
+      - name: Audit runtime dependencies
+        run: pip-audit -r requirements.txt --desc
 
-      - name: Run static security scan
-        run: bandit -q -r app
+      - name: Static application security testing
+        run: bandit -c ../../pyproject.toml -q -r app
+
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan history for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  codeql:
+    name: codeql analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+
+  container-scan:
+    name: container vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build -t docsynth/orchestrator:scan services/orchestrator
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: docsynth/orchestrator:scan
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload scan results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif

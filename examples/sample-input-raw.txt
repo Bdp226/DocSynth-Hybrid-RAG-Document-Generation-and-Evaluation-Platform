@@ -1,0 +1,9 @@
+Slide 12: Ingestion overview. Priya said she'd follow up on the connector list.
+Action item on slide 13. The platform accepts slide decks, PDFs and workspace documents.
+Slide 14: it normalises them into chunked text with slide-accurate figure extraction.
+Retrieval ranks those chunks with a hybrid BM25 and embedding scorer.
+Generation is routed to a fast, default or strong model depending on detail level.
+Rendering emits PDF and DOCX with captions and tables.
+Baseline config processed 18 documents per minute at 4.2 seconds median latency.
+Tuned config processed 42 documents per minute at 1.8 seconds median latency.
+Cached config processed 61 documents per minute at 1.1 seconds median latency.

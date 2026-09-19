@@ -14,7 +14,6 @@ from app.telemetry import (
     estimate_llm_authorship,
 )
 
-
 SAMPLE_DOCUMENT = """# Platform Reference — Technical Documentation
 
 ## Part 1: Solution Architecture
@@ -119,17 +118,17 @@ def test_registry_snapshot_is_empty_before_any_run():
 
 
 def _run(**overrides) -> RunMetrics:
-    defaults = dict(
-        document_id="doc",
-        generation_mode="full_deck",
-        succeeded=True,
-        total_latency_ms=1000.0,
-        topics=10,
-        llm_topics=5,
-        llm_coverage_rate=0.5,
-        leak_counts={"slide_reference": 0},
-        content_integrity_pass=True,
-    )
+    defaults = {
+        "document_id": "doc",
+        "generation_mode": "full_deck",
+        "succeeded": True,
+        "total_latency_ms": 1000.0,
+        "topics": 10,
+        "llm_topics": 5,
+        "llm_coverage_rate": 0.5,
+        "leak_counts": {"slide_reference": 0},
+        "content_integrity_pass": True,
+    }
     defaults.update(overrides)
     return RunMetrics(**defaults)
 

@@ -7,5 +7,22 @@ python-docx==1.1.2
 reportlab==4.2.5
 pypdf==5.0.1
 python-pptx==1.0.2
+
+# Imported directly by app/image_intelligence.py.
+# NOTE: sentence-transformers and qdrant-client are intentionally absent here.
+# sentence-transformers is imported lazily inside workspace_context, so CI can
+# exercise the full test suite without pulling torch into every job.
+numpy==2.2.6
+Pillow==11.3.0
+
+# --- test tooling ---
 pytest==8.3.3
 pytest-asyncio==0.24.0
+pytest-cov==5.0.0
+
+# --- lint / types / security (mirrors CI exactly) ---
+ruff==0.6.9
+mypy==2.3.1
+bandit[toml]==1.7.10
+pip-audit==2.7.3
+pre-commit==3.8.0

@@ -11,7 +11,14 @@ __pycache__/
 # Testing & Coverage
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Local scratch output
+live_*.txt
+*_output.txt
 
 # Build & Generated Artifacts
 build/
@@ -23,6 +30,10 @@ services/orchestrator/build/
 *.png
 *.jpg
 *.jpeg
+
+# Committed demo evidence is an exception: reviewers must be able to see real
+# output without running anything. Regenerate with scripts/generate_demo_assets.py
+!examples/**
 
 # Environment Secrets
 .env

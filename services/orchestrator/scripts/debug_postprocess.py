@@ -1,4 +1,5 @@
 """Find which post-processing rule removes generated narrative lines."""
+
 from __future__ import annotations
 
 import re
@@ -19,15 +20,17 @@ SAMPLE = [
 ]
 
 RULES = {
-    "source_chunk": lambda l: re.match(r"^Source Chunk:\s*", l, re.IGNORECASE),
-    "slide_marker": lambda l: re.match(r"^\[Slide\s+\d+\]$", l, re.IGNORECASE),
-    "author_dept": lambda l: re.match(r"^Author\s*\|\s*Department$", l, re.IGNORECASE),
-    "shift_ise": lambda l: re.match(r"^SHIFT\s+ISE\s+India$", l, re.IGNORECASE),
-    "plan_to_do": lambda l: re.match(r"^What\s+we\s+plan\s+to\s+do\??$", l, re.IGNORECASE),
-    "chatter": lambda l: re.search(r"\b(discussed|introduced|asked|explained|mentioned|looping in)\b", l, re.IGNORECASE),
-    "name_list": lambda l: re.search(r"(?:\b[A-Z][a-z]+\b,\s*){2,}\b(?:and\s+)?[A-Z][a-z]+\b", l),
-    "x_days": lambda l: re.search(r"\b[A-Z]\s+Days\b", l),
-    "many_q": lambda l: l.count("?") >= 2,
+    "source_chunk": lambda line: re.match(r"^Source Chunk:\s*", line, re.IGNORECASE),
+    "slide_marker": lambda line: re.match(r"^\[Slide\s+\d+\]$", line, re.IGNORECASE),
+    "author_dept": lambda line: re.match(r"^Author\s*\|\s*Department$", line, re.IGNORECASE),
+    "shift_ise": lambda line: re.match(r"^SHIFT\s+ISE\s+India$", line, re.IGNORECASE),
+    "plan_to_do": lambda line: re.match(r"^What\s+we\s+plan\s+to\s+do\??$", line, re.IGNORECASE),
+    "chatter": lambda line: re.search(
+        r"\b(discussed|introduced|asked|explained|mentioned|looping in)\b", line, re.IGNORECASE
+    ),
+    "name_list": lambda line: re.search(r"(?:\b[A-Z][a-z]+\b,\s*){2,}\b(?:and\s+)?[A-Z][a-z]+\b", line),
+    "x_days": lambda line: re.search(r"\b[A-Z]\s+Days\b", line),
+    "many_q": lambda line: line.count("?") >= 2,
 }
 
 for text in SAMPLE:

@@ -6,8 +6,51 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Fast feedback: style and types fail in under a minute before anything heavy.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint & types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: services/orchestrator/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r services/orchestrator/requirements-dev.txt
+
+      - name: Ruff lint
+        run: ruff check . --output-format=github
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Mypy
+        run: mypy
+
+  # ---------------------------------------------------------------------------
+  # Correctness across the supported OS/Python matrix.
+  # ---------------------------------------------------------------------------
   test:
+    name: tests (${{ matrix.os }} / py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -41,7 +84,79 @@ jobs:
       - name: Run API and document pipeline tests
         run: pytest tests -q
 
+  # ---------------------------------------------------------------------------
+  # Coverage is a gate, not a report: pyproject sets fail_under.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: coverage gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: services/orchestrator
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: services/orchestrator/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests with branch coverage
+        run: pytest tests --cov=app --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: services/orchestrator/coverage.xml
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Output quality is treated as a build artifact. A regression here fails the
+  # build even when every unit test is green.
+  # ---------------------------------------------------------------------------
+  quality-gate:
+    name: generation quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: services/orchestrator/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r services/orchestrator/requirements-dev.txt
+
+      - name: Evaluate the golden regression set against committed thresholds
+        run: python pipelines/eval/run_eval.py --mode mock --gate --baseline --output /tmp/eval_report.json
+
+      - name: Upload evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: /tmp/eval_report.json
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # End-to-end artifact build: proves a real PDF/DOCX still renders.
+  # ---------------------------------------------------------------------------
   smoke-doc-build:
+    name: artifact smoke build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -68,3 +183,62 @@ jobs:
 
       - name: Build representative deck artifacts
         run: python scripts/check_compose_full_deck.py
+
+  # ---------------------------------------------------------------------------
+  # The container must build and start as a non-root user with a working probe.
+  # ---------------------------------------------------------------------------
+  container:
+    name: container build & probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/orchestrator
+          push: false
+          load: true
+          tags: docsynth/orchestrator:ci
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.repository.updated_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start container
+        run: |
+          docker run -d --name docsynth -p 8080:8080 \
+            -e ENFORCE_IDENTITY_HEADERS=false \
+            docsynth/orchestrator:ci
+
+      - name: Wait for liveness
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8080/healthz; then
+              echo "service is live"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "service did not become live" >&2
+          docker logs docsynth
+          exit 1
+
+      - name: Verify operational endpoints
+        run: |
+          curl --fail --silent http://127.0.0.1:8080/version | tee /dev/stderr
+          curl --fail --silent "http://127.0.0.1:8080/metrics?format=prometheus" | head -n 5
+          curl --silent -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/readyz
+
+      - name: Confirm the container runs as non-root
+        run: |
+          uid=$(docker exec docsynth id -u)
+          echo "container uid=$uid"
+          test "$uid" != "0"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker logs docsynth

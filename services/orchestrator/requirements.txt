@@ -10,3 +10,9 @@ reportlab==4.2.5
 aiofiles==24.1.0
 pypdf==5.0.1
 python-pptx==1.0.2
+
+# Imported directly by app/image_intelligence.py. Declared explicitly rather
+# than relied on transitively via sentence-transformers / reportlab, so the
+# lighter CI dependency set installs them too.
+numpy==2.2.6
+Pillow==11.3.0

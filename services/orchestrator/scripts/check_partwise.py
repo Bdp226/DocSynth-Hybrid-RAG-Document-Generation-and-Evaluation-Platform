@@ -1,4 +1,5 @@
 """Measure the restructured part-wise document: structure, tables, figures, and leakage checks."""
+
 from __future__ import annotations
 
 import asyncio

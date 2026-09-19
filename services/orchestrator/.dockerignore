@@ -1,0 +1,16 @@
+# Build context is services/orchestrator; only `app` and requirements.txt are needed.
+build/
+tests/
+scripts/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+requirements-dev.txt
+Dockerfile
+.dockerignore
+*.md
+.env
+*.local

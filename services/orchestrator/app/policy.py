@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 PII_PATTERNS = {
     "email": re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"),
     "phone": re.compile(r"\+?[0-9][0-9\-\s]{7,}[0-9]"),

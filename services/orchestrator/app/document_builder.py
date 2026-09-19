@@ -2,21 +2,23 @@ from __future__ import annotations
 
 import base64
 import binascii
-from io import BytesIO
-from dataclasses import dataclass
-from pathlib import Path
 import re
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
 
 from docx import Document
+from docx.document import Document as DocxDocument
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches
-from docx.shared import Pt, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     Image as RLImage,
+)
+from reportlab.platypus import (
     ListFlowable,
     ListItem,
     Paragraph,
@@ -330,7 +332,10 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
             return
 
         data = [
-            [Paragraph(_markdown_to_reportlab_markup(cell), header_cell_style if row_index == 0 else cell_style) for cell in row]
+            [
+                Paragraph(_markdown_to_reportlab_markup(cell), header_cell_style if row_index == 0 else cell_style)
+                for cell in row
+            ]
             for row_index, row in enumerate(matrix)
         ]
         available_width = A4[0] - 96
@@ -446,7 +451,7 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
     return buffer.getvalue()
 
 
-def _add_brand_header_docx(doc: Document) -> None:
+def _add_brand_header_docx(doc: DocxDocument) -> None:
     header = doc.sections[0].header
     header_para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
     header_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -599,7 +604,9 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
     return buffer.getvalue()
 
 
-def generate_artifacts(document_id: str, text: str, formats: list[str], image_inputs: list[ImageInput] | None = None) -> list[RenderedArtifact]:
+def generate_artifacts(
+    document_id: str, text: str, formats: list[str], image_inputs: list[ImageInput] | None = None
+) -> list[RenderedArtifact]:
     artifacts: list[RenderedArtifact] = []
     normalized = [fmt.strip().lower() for fmt in formats]
 

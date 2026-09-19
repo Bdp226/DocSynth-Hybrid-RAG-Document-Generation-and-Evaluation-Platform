@@ -1,0 +1,137 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docsynth"
+version = "1.0.0"
+description = "Enterprise multi-modal document synthesis engine with grounded retrieval, evaluation gates, and production telemetry."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "DocSynth Maintainers" }]
+keywords = ["rag", "llm", "document-generation", "evaluation", "fastapi"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Topic :: Text Processing :: Markup",
+]
+
+[project.urls]
+Documentation = "docs/architecture.md"
+Changelog = "CHANGELOG.md"
+
+[tool.setuptools]
+packages = []
+
+# --------------------------------------------------------------------------
+# Lint / format
+# --------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["services/orchestrator", "pipelines"]
+extend-exclude = ["services/orchestrator/build", ".venv", "deploy"]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "W",   # pycodestyle warnings
+  "I",   # isort
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+  "C4",  # comprehensions
+  "SIM", # simplify
+  "RUF", # ruff-specific
+]
+ignore = [
+  "B008",   # FastAPI Depends() in defaults is idiomatic
+  "SIM108", # ternary rewrites hurt readability in scoring code
+  "RUF012", # mutable class attrs are fine for local registries
+  # `ruff format` is authoritative for line length. The only remaining E501s are
+  # prompt and guidance string literals, which a formatter cannot split; breaking
+  # them by hand obscures the prompt text that is actually sent to the model.
+  "E501",
+  # This is a document-processing product. En dashes, curly quotes, and similar
+  # typography are legitimate content in prompts, fixtures, and rendered output.
+  "RUF001",
+  "RUF002",
+  "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"services/orchestrator/tests/*" = ["E501"]
+"services/orchestrator/scripts/*" = ["E501", "T201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "lf"
+
+# --------------------------------------------------------------------------
+# Static typing
+# --------------------------------------------------------------------------
+[tool.mypy]
+# Type-checking targets 3.12 because numpy 2.x ships stubs that use the 3.12
+# `type` statement, and a syntax error in a dependency's stub cannot be
+# suppressed. Runtime compatibility with 3.11 is still enforced by ruff
+# (target-version = py311) and by the 3.11 leg of the CI test matrix.
+python_version = "3.12"
+files = ["services/orchestrator/app"]
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = false
+disable_error_code = ["annotation-unchecked"]
+
+[[tool.mypy.overrides]]
+module = ["pptx.*", "docx.*", "reportlab.*", "qdrant_client.*", "sentence_transformers.*"]
+ignore_missing_imports = true
+
+# --------------------------------------------------------------------------
+# Tests / coverage
+# --------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["services/orchestrator/tests"]
+addopts = "-q --strict-markers"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "slow: long-running end-to-end generation tests",
+  "live_llm: requires a reachable local LLM endpoint",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+omit = ["*/tests/*", "*/build/*", "*/scripts/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+precision = 1
+fail_under = 75
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+]
+
+# --------------------------------------------------------------------------
+# Security scanning
+# --------------------------------------------------------------------------
+[tool.bandit]
+exclude_dirs = ["services/orchestrator/tests", "services/orchestrator/build", ".venv"]
+# B101: asserts are used for invariants in non-test helpers, stripped only under -O.
+# B112: the ingestion loops deliberately skip individual unparseable files rather
+#       than failing an entire multi-document run; the exception is logged upstream.
+skips = ["B101", "B112"]

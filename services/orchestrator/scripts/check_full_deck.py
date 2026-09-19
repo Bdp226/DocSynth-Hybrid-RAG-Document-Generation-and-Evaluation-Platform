@@ -1,4 +1,5 @@
 """Offline validation of the full-deck pipeline: slide extraction -> inline figures -> PDF."""
+
 from __future__ import annotations
 
 import asyncio
