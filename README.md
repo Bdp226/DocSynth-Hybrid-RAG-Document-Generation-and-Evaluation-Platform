@@ -1,4 +1,4 @@
-# DocSynth — Enterprise Multi-Modal Document Synthesis Engine - A Hybrid RAG Generation engine
+# DocSynth — Enterprise Multi-Modal Document Synthesis Engine involving Hybrid RAG, Telemetry
 
 A production-style AI document workflow for transforming enterprise slide decks, workspace files, and visual content into publication-ready documentation.
 
