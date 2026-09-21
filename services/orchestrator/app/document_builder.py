@@ -2,23 +2,21 @@ from __future__ import annotations
 
 import base64
 import binascii
-import re
-from dataclasses import dataclass
 from io import BytesIO
+from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from docx import Document
-from docx.document import Document as DocxDocument
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches, Pt, RGBColor
+from docx.shared import Inches
+from docx.shared import Pt, RGBColor
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     Image as RLImage,
-)
-from reportlab.platypus import (
     ListFlowable,
     ListItem,
     Paragraph,
@@ -65,6 +63,14 @@ _IMAGE_TOKEN_RE = re.compile(r"^\[\[IMAGE:(.+?)\]\]$")
 
 _MAX_CAPTION_CHARS = 72
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s")
+# The composer (main.py) already writes an explicit numbered caption line immediately
+# before an image token for full-deck documents. When that line is present, the
+# document builder must not add a second, auto-generated caption for the same figure.
+_EXPLICIT_CAPTION_RE = re.compile(r"^\s*Figure\s+\d+[.:]\s")
+# Uncaptioned source screenshots that never made it into the body are archived here for
+# traceability; dumping every remaining image (sometimes 100+) makes the appendix
+# unusable, so only a bounded, representative sample is published.
+_MAX_APPENDIX_IMAGES = 24
 
 
 def _caption_subject(section_title: str) -> str:
@@ -304,6 +310,7 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
     title_used = False
     figure_number = 0
     current_section = ""
+    previous_line = ""
     image_lookup = _image_lookup(image_inputs)
     used_image_names: set[str] = set()
 
@@ -332,10 +339,7 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
             return
 
         data = [
-            [
-                Paragraph(_markdown_to_reportlab_markup(cell), header_cell_style if row_index == 0 else cell_style)
-                for cell in row
-            ]
+            [Paragraph(_markdown_to_reportlab_markup(cell), header_cell_style if row_index == 0 else cell_style) for cell in row]
             for row_index, row in enumerate(matrix)
         ]
         available_width = A4[0] - 96
@@ -391,19 +395,16 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
                 used_image_names.add(image_name)
                 flowable = _pdf_image_flowable(image_bytes, width=PDF_MAX_WIDTH_PT, height=PDF_MAX_HEIGHT_PT)
                 if flowable is not None:
-                    figure_number += 1
                     story.append(Spacer(1, 6))
                     story.append(flowable)
-                    story.append(
-                        Paragraph(
-                            _markdown_to_reportlab_markup(_figure_caption(figure_number, current_section)),
-                            caption_style,
-                        )
-                    )
+                    # Captions are authored by the composer directly in markdown.
+                    # Do not synthesize an additional renderer-side caption.
+            previous_line = line
             continue
 
         if re.match(r"^[-*•]\s+", line):
             bullet_buffer.append(re.sub(r"^[-*•]\s+", "", line))
+            previous_line = line
             continue
 
         flush_bullets()
@@ -429,6 +430,7 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
             story.append(Paragraph(_markdown_to_reportlab_markup(heading), h2_style))
         else:
             story.append(Paragraph(_markdown_to_reportlab_markup(line), body_style))
+        previous_line = line
 
     flush_bullets()
     flush_table()
@@ -436,22 +438,34 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
     if remaining_images:
         story.append(Spacer(1, 14))
         story.append(Paragraph("Image Appendix", h2_style))
-        for image in remaining_images:
+        appendix_number = 0
+        for image in remaining_images[:_MAX_APPENDIX_IMAGES]:
             image_bytes = image_lookup.get(image.image_name)
             if image_bytes is None:
                 continue
             flowable = _pdf_image_flowable(image_bytes, width=PDF_MAX_WIDTH_PT, height=PDF_MAX_HEIGHT_PT)
             if flowable is None:
                 continue
-            story.append(Paragraph(_markdown_to_reportlab_markup(image.image_name), body_style))
+            # Internal source filenames are not publication content; number the plates instead.
+            appendix_number += 1
+            story.append(Paragraph(f"Appendix Figure {appendix_number}", body_style))
             story.append(Spacer(1, 4))
             story.append(flowable)
             story.append(Spacer(1, 10))
+        overflow = len(remaining_images) - appendix_number
+        if overflow > 0:
+            story.append(
+                Paragraph(
+                    f"A further {overflow} supporting screenshot(s) are held in the source material and are "
+                    "not reproduced here.",
+                    body_style,
+                )
+            )
     doc.build(story, onFirstPage=_draw_brand_header, onLaterPages=_draw_brand_header)
     return buffer.getvalue()
 
 
-def _add_brand_header_docx(doc: DocxDocument) -> None:
+def _add_brand_header_docx(doc: Document) -> None:
     header = doc.sections[0].header
     header_para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
     header_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -547,15 +561,15 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
             if image_bytes is not None:
                 used_image_names.add(image_name)
                 if _docx_add_picture(doc, image_bytes):
-                    figure_number += 1
-                    caption_para = doc.add_paragraph()
-                    caption_run = caption_para.add_run(_figure_caption(figure_number, current_section))
-                    caption_run.italic = True
-                    caption_run.font.size = Pt(9)
+                    # Captions are authored by the composer directly in markdown.
+                    # Do not synthesize an additional renderer-side caption.
+                    pass
+            previous_line = line
             continue
 
         if re.match(r"^[-*•]\s+", line):
             bullet_buffer.append(re.sub(r"^[-*•]\s+", "", line))
+            previous_line = line
             continue
 
         flush_bullets()
@@ -583,6 +597,7 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
         else:
             body_para = doc.add_paragraph()
             _add_markdown_runs_docx(body_para, line)
+        previous_line = line
 
     flush_bullets()
     flush_table()
@@ -590,23 +605,31 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
     remaining_images = [image for image in (image_inputs or []) if image.image_name not in used_image_names]
     if remaining_images:
         doc.add_heading("Image Appendix", level=2)
-        for image in remaining_images:
+        appendix_number = 0
+        for image in remaining_images[:_MAX_APPENDIX_IMAGES]:
             image_bytes = image_lookup.get(image.image_name)
             if image_bytes is None:
                 continue
-            caption = doc.add_paragraph(image.image_name)
+            # Internal source filenames are not publication content; number the plates instead.
+            appendix_number += 1
+            caption = doc.add_paragraph(f"Appendix Figure {appendix_number}")
             if not _docx_add_picture(doc, image_bytes):
                 # Drop the orphaned caption when the image cannot be embedded.
                 caption._element.getparent().remove(caption._element)
+                appendix_number -= 1
+        overflow = len(remaining_images) - appendix_number
+        if overflow > 0:
+            doc.add_paragraph(
+                f"A further {overflow} supporting screenshot(s) are held in the source material and are "
+                "not reproduced here."
+            )
 
     buffer = BytesIO()
     doc.save(buffer)
     return buffer.getvalue()
 
 
-def generate_artifacts(
-    document_id: str, text: str, formats: list[str], image_inputs: list[ImageInput] | None = None
-) -> list[RenderedArtifact]:
+def generate_artifacts(document_id: str, text: str, formats: list[str], image_inputs: list[ImageInput] | None = None) -> list[RenderedArtifact]:
     artifacts: list[RenderedArtifact] = []
     normalized = [fmt.strip().lower() for fmt in formats]
 

@@ -1,17 +1,16 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 from pptx import Presentation
 from pptx.util import Inches
 
-from app.workspace_context import (
-    _looks_like_noise_line,
-    _normalize_slide_title,
-    build_workspace_context,
-    extract_workspace_images_from_paths,
-)
+from app.workspace_context import build_workspace_context
+from app.workspace_context import extract_pptx_slide_records
+from app.workspace_context import extract_workspace_images_from_paths
+from app.workspace_context import _looks_like_noise_line, _normalize_slide_title
 
 
 def test_person_rosters_are_filtered_but_domain_phrases_are_kept() -> None:
@@ -39,6 +38,11 @@ def test_documentation_prose_is_not_treated_as_meeting_chatter() -> None:
     # A named participant performing the verb is real chatter.
     assert _looks_like_noise_line("Kaushik explained the sandbox requirements to the team.")
     assert _looks_like_noise_line("Looping in SCM team for the pending approval.")
+
+
+def test_confidentiality_template_fragments_are_filtered() -> None:
+    assert _looks_like_noise_line("Restricted © Siemens Healthineers")
+    assert _looks_like_noise_line("Restricted access to LLMs limiting AI capabilities and adoption")
 
 
 def test_normalize_slide_title_prefers_topic_and_caps_length() -> None:
@@ -97,9 +101,7 @@ def test_build_workspace_context_reports_cache_hits_on_repeated_reads(tmp_path: 
 
 def test_build_workspace_context_diversifies_redundant_chunks(tmp_path: Path) -> None:
     (tmp_path / "primary.md").write_text(
-        "Alpha rollout summary.\n\n"
-        + ("same repeated cluster text " * 50)
-        + "\n\nUnique governance section with approval workflow.",
+        "Alpha rollout summary.\n\n" + ("same repeated cluster text " * 50) + "\n\nUnique governance section with approval workflow.",
         encoding="utf-8",
     )
 

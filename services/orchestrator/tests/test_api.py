@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.config import settings
+
 
 client = TestClient(main.app)
 
@@ -24,18 +27,29 @@ def _headers(user_id: str = "user-001", role: str = "author") -> dict[str, str]:
 def test_document_title_never_echoes_the_prompt_or_slide_range() -> None:
     req = SimpleNamespace(
         user_prompt=(
-            "Describe in professional way the full doc as per ppt slides and give " "from slide 81-144 and with images"
+            "Describe in professional way the full doc as per ppt slides and give "
+            "from slide 81-144 and with images"
         ),
         objective="Produce complete publication-ready documentation from the deck",
         domain="enterprise platform",
     )
     records = [SimpleNamespace(title="A playground for AI agents' evaluation")]
 
+    # The source file names the whole deck; a leading slide title names only one of its topics.
     title = main._derive_document_title(req, records, ["Sandbox environment.pptx"])
 
-    assert title == "A playground for AI agents' evaluation — Technical Documentation"
+    assert title == "Sandbox environment — Technical Documentation"
     assert "slide" not in title.lower()
     assert "describe" not in title.lower()
+
+
+def test_document_title_uses_cover_slide_when_no_source_file() -> None:
+    req = SimpleNamespace(user_prompt="make me a pdf", objective="", domain="general")
+    records = [SimpleNamespace(title="A playground for AI agents' evaluation")]
+
+    title = main._derive_document_title(req, records, [])
+
+    assert title == "A playground for AI agents' evaluation — Technical Documentation"
 
 
 def test_document_title_falls_back_to_source_name_when_no_cover_title() -> None:
@@ -58,16 +72,166 @@ def test_topic_narrative_mentions_each_figure_with_descriptive_context() -> None
 
     narrative = main._deterministic_topic_narrative(unit)
 
-    assert "Figure" in narrative
-    assert "illustrates" in narrative.lower()
     assert "setup-figure.png" not in narrative
     assert "isolated network access" in narrative
+
+    # Figures are introduced by a numbered caption, not by a repeated prose sentence.
+    caption = main._figure_caption(unit, 7, view=1)
+    assert caption == "Figure 7. Environment Setup"
+    assert main._figure_caption(unit, 8, view=2) == "Figure 8. Continuation view 2."
+
+
+def test_image_only_topic_emits_no_repeated_prose_filler() -> None:
+    unit = main._TopicUnit(
+        title="Network Topology",
+        images=[SimpleNamespace(image_name="topology.png")],
+    )
+
+    narrative = main._deterministic_topic_narrative(unit)
+
+    assert narrative == ""
+
+
+def test_topic_narratives_do_not_repeat_boilerplate_across_topics() -> None:
+    units = [
+        main._TopicUnit(
+            title=f"Topic {index}",
+            lines=[
+                f"Statement {index} records the configured behaviour of the documented subject.",
+                f"Control {index} covers access, logging and retention for the documented subject.",
+                f"Evidence {index} confirms the validation performed against the documented subject.",
+                f"Approval {index} captures the accountable owner sign-off for the documented subject.",
+            ],
+            tables=[[["Item", "Value"], [f"row-{index}", str(index)]]],
+        )
+        for index in range(12)
+    ]
+
+    sentences: list[str] = []
+    for unit in units:
+        narrative = main._deterministic_topic_narrative(unit)
+        sentences.extend(
+            re.sub(r"\s+", " ", sentence).strip().casefold()
+            for sentence in re.split(r"(?<=[.!?])\s+", narrative)
+            if len(sentence.strip()) >= 40
+        )
+
+    duplicates = {sentence for sentence, count in Counter(sentences).items() if count > 1}
+
+    assert not duplicates, f"boilerplate repeated across topics: {sorted(duplicates)[:3]}"
+
+    # Exact-match counting alone gives a false pass: a template such as
+    # "This section sets out <Title>." is textually unique per topic yet is still the same
+    # sentence repeated. Keying on the opening words exposes that shape.
+    shapes = Counter(" ".join(re.findall(r"[a-z0-9]+", sentence)[:5]) for sentence in sentences)
+    templated = {shape: count for shape, count in shapes.items() if count > 2}
+
+    assert not templated, f"templated sentence shape repeated across topics: {templated}"
+
+
+def test_topic_narrative_does_not_restate_its_own_heading() -> None:
+    unit = main._TopicUnit(
+        title="Benefits from Gen AI",
+        lines=[
+            "Benefits from Gen AI Generative coding accelerates work across building and verification.",
+        ],
+    )
+
+    narrative = main._deterministic_topic_narrative(unit)
+
+    assert not narrative.lower().startswith("benefits from gen ai")
+    assert "accelerates work across building and verification" in narrative
+
+
+def test_figure_caption_preserves_acronym_casing() -> None:
+    unit = main._TopicUnit(
+        title="CMDB and SDLC onboarding for SHS AI",
+        images=[SimpleNamespace(image_name="a.png")],
+    )
+
+    caption = main._figure_reference_sentence(unit)
+
+    assert "CMDB and SDLC onboarding for SHS AI" in caption
+
+
+def test_topics_without_publishable_content_are_dropped() -> None:
+    empty = main._TopicUnit(title="Within Tech Industry", lines=["Short note"])
+    placeholder = main._TopicUnit(
+        title="Content slide SH-Bree-Headline 27 pt",
+        lines=["A sufficiently long placeholder line that would otherwise be published."],
+    )
+    real = main._TopicUnit(
+        title="Environment Setup",
+        lines=["The sandbox provisions a dedicated VM with isolated network access."],
+    )
+
+    assert not main._is_publishable_topic(empty)
+    assert not main._is_publishable_topic(placeholder)
+    assert main._is_publishable_topic(real)
+
+
+def test_clean_topic_title_drops_trailing_truncation_tokens() -> None:
+    assert (
+        main._clean_topic_title(
+            "Azure Cost Analysis Stepwise Process – After navigation select the appropriate resource group as…"
+        )
+        == "Azure Cost Analysis Stepwise Process – After navigation select the appropriate resource group"
+    )
+
+
+def test_merge_topics_groups_same_family_walkthrough_headings() -> None:
+    records = [
+        SimpleNamespace(
+            title="Azure Cost Analysis Stepwise Process – Visiting the Azure Portal",
+            lines=["Visit the portal and open the assigned subscription for the sandbox."],
+            tables=[],
+            images=[],
+        ),
+        SimpleNamespace(
+            title="Azure Cost Analysis Stepwise Process – Navigate to respective Resource Group Assigned",
+            lines=["Open the target resource group and move to the Cost Management panel."],
+            tables=[],
+            images=[],
+        ),
+    ]
+
+    merged = main._merge_slide_records_into_topics(records)
+
+    assert len(merged) == 1
+    assert "Azure Cost Analysis Stepwise Process" in merged[0].title
+    assert len(merged[0].lines) == 2
+
+
+def test_repeated_structural_filler_is_emitted_only_once() -> None:
+    lines = [
+        "This part consolidates 4 related topic(s) drawn from the source material.",
+        "Real content line.",
+        "This part consolidates 7 related topic(s) drawn from the source material.",
+        "A further 3 screenshot(s) of the same sequence are held in the source material.",
+        "A further 5 screenshot(s) of the same sequence are held in the source material.",
+    ]
+
+    kept = main._drop_repeated_scaffolding(lines)
+
+    assert kept == [lines[0], lines[1], lines[3]]
 
 
 def test_document_title_uses_last_resort_when_nothing_usable() -> None:
     req = SimpleNamespace(user_prompt="generate docs", objective="", domain="general")
 
     assert main._derive_document_title(req, [], []) == "Technical Reference Documentation"
+
+
+def test_llm_cache_busts_when_generation_version_changes(monkeypatch) -> None:
+    original_version = settings.llm_cache_version
+    try:
+        settings.llm_cache_version = "docgen-v1"
+        key_v1 = main._cache_key_for_request("llama3.1:8b-instruct", "create a report")
+        settings.llm_cache_version = "docgen-v2"
+        key_v2 = main._cache_key_for_request("llama3.1:8b-instruct", "create a report")
+        assert key_v1 != key_v2
+    finally:
+        settings.llm_cache_version = original_version
 
 
 def test_optimize_success(monkeypatch) -> None:
@@ -306,23 +470,18 @@ Random talkative conversation??
                 text="Key risks include approval lead times, infrastructure dependencies, and security review delays, each requiring explicit mitigation tracking.",
             ),
         ]
-        return (
-            "workspace context",
-            ["sandbox.pdf"],
-            chunks,
-            SimpleNamespace(
-                candidate_files=1,
-                selected_files=1,
-                chunks_scored=4,
-                returned_chunks=4,
-                cache_hits=0,
-                cache_misses=1,
-                context_chars=400,
-                retrieval_latency_ms=5,
-                top_score=0.91,
-                avg_top_score=0.8725,
-                used_embeddings=False,
-            ),
+        return "workspace context", ["sandbox.pdf"], chunks, SimpleNamespace(
+            candidate_files=1,
+            selected_files=1,
+            chunks_scored=4,
+            returned_chunks=4,
+            cache_hits=0,
+            cache_misses=1,
+            context_chars=400,
+            retrieval_latency_ms=5,
+            top_score=0.91,
+            avg_top_score=0.8725,
+            used_embeddings=False,
         )
 
     monkeypatch.setattr(main, "_generate_with_llm", fake_generate)
@@ -366,23 +525,18 @@ def test_compose_includes_workspace_ppt_images(tmp_path: Path, monkeypatch) -> N
         return "# Structured Document\n\n## Executive Overview\n\nFormal content"
 
     def fake_build_workspace_context(*args, **kwargs):
-        return (
-            "workspace context",
-            ["deck.pptx"],
-            [],
-            SimpleNamespace(
-                candidate_files=1,
-                selected_files=1,
-                chunks_scored=0,
-                returned_chunks=0,
-                cache_hits=0,
-                cache_misses=1,
-                context_chars=20,
-                retrieval_latency_ms=5,
-                top_score=0.0,
-                avg_top_score=0.0,
-                used_embeddings=False,
-            ),
+        return "workspace context", ["deck.pptx"], [], SimpleNamespace(
+            candidate_files=1,
+            selected_files=1,
+            chunks_scored=0,
+            returned_chunks=0,
+            cache_hits=0,
+            cache_misses=1,
+            context_chars=20,
+            retrieval_latency_ms=5,
+            top_score=0.0,
+            avg_top_score=0.0,
+            used_embeddings=False,
         )
 
     def fake_extract_workspace_images_from_paths(*args, **kwargs):
@@ -611,7 +765,6 @@ def test_generate_with_llm_short_circuits_missing_vision_model(tmp_path: Path, m
     monkeypatch.setattr(main, "_model_availability_cache", {})
     monkeypatch.setattr(main, "_installed_models_cache", None)
     monkeypatch.setattr(main.app.state, "http_client", fake_client, raising=False)
-
     async def fake_installed_models(force_refresh: bool = False):
         return {settings.llm_model}
 

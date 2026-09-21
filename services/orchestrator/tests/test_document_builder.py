@@ -5,7 +5,9 @@ from docx import Document as DocxDocument
 from app.document_builder import generate_artifacts
 from app.models import ImageInput
 
-ONE_PIXEL_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+ONE_PIXEL_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 def test_generate_artifacts_builds_pdf_and_docx() -> None:
@@ -66,10 +68,40 @@ def test_inline_image_tokens_render_in_body_and_skip_appendix() -> None:
     assert "Slide 1 - Figure 1.png" not in full_text
     # The inline image is not repeated in the appendix, but the unused one still is.
     assert "Image Appendix" in full_text
-    assert "unused-figure.png" in full_text
+    # Appendix plates are numbered; internal source filenames are never published.
+    assert "Appendix Figure 1" in full_text
+    assert "unused-figure.png" not in full_text
 
     assert len(doc.inline_shapes) == 2
     assert len(pdf_artifact.content) > 0
+
+
+def test_explicit_caption_line_is_not_duplicated_by_auto_caption() -> None:
+    """When the composer already writes 'Figure N. Subject' before an image, the builder
+    must not also append its own auto-generated 'Figure N — Subject' caption."""
+    images = [
+        ImageInput(
+            image_name="img1.png",
+            mime_type="image/png",
+            content_base64=ONE_PIXEL_PNG_B64,
+        ),
+    ]
+    text = (
+        "# Title\n\n"
+        "## Section\n\n"
+        "Figure 1. Test Subject\n\n"
+        "[[IMAGE:img1.png]]\n\n"
+        "Some body text after the figure."
+    )
+
+    artifacts = generate_artifacts("doc-caption", text, ["docx", "pdf"], image_inputs=images)
+    docx_artifact = next(a for a in artifacts if a.format == "docx")
+
+    doc = DocxDocument(BytesIO(docx_artifact.content))
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert full_text.count("Figure 1") == 1
+    assert "Figure 1 \u2014" not in full_text
 
 
 def test_markdown_tables_render_as_real_tables() -> None:
@@ -103,3 +135,4 @@ def test_markdown_tables_render_as_real_tables() -> None:
     assert "---" not in body_text
     assert "| Item |" not in body_text
     assert len(pdf_artifact.content) > 0
+
