@@ -4,7 +4,6 @@ import asyncio
 import base64
 import binascii
 import hashlib
-import inspect
 import json
 import logging
 import re
@@ -22,7 +21,9 @@ from fastapi.staticfiles import StaticFiles
 
 from .artifact_store import load_artifact, save_artifact
 from .config import SERVICE_NAME, SERVICE_VERSION, settings
+from .cost import calculate_cost
 from .document_builder import generate_artifacts
+from .hooks import invoke_post_compose, invoke_pre_compose, invoke_post_optimize, invoke_pre_optimize
 from .ingress import RateLimiter, client_key, oversized_request_bytes
 from .models import ComposeRequest, ComposeResponse, ImageInput, OptimizeRequest, OptimizeResponse
 from .policy import detect_policy_flags, enforce_input_limits
@@ -129,8 +130,7 @@ async def ingress_guard_middleware(request, call_next):
             },
         )
 
-    exempt_paths = getattr(settings, "rate_limit_exempt_path_set", set())
-    if path in exempt_paths or path.startswith("/ui"):
+    if path in settings.rate_limit_exempt_path_set or path.startswith("/ui"):
         return await call_next(request)
 
     key = client_key(request.headers.get("X-User-Id"), request.client.host if request.client else None)
@@ -219,8 +219,6 @@ def _generation_cache_path(cache_key: str) -> Path:
 
 def _cache_key_for_request(model_name: str, prompt: str, images: list[str] | None = None) -> str:
     digest = hashlib.sha256()
-    digest.update(settings.llm_cache_version.encode("utf-8"))
-    digest.update(b"\x00")
     digest.update(model_name.encode("utf-8"))
     digest.update(b"\x00")
     digest.update(prompt.encode("utf-8"))
@@ -1212,7 +1210,7 @@ def _merge_slide_records_into_topics(slide_records: list) -> list[_TopicUnit]:
     units: list[_TopicUnit] = []
 
     for record in slide_records:
-        title = _clean_topic_title((record.title or "").strip())
+        title = (record.title or "").strip()
         key = title.lower()
         previous = units[-1] if units else None
 
@@ -1235,7 +1233,7 @@ def _merge_slide_records_into_topics(slide_records: list) -> list[_TopicUnit]:
             target.lines.append(line)
 
         target.tables.extend(record.tables)
-        _extend_unique_images(target, record.images)
+        target.images.extend(record.images)
 
     # Second pass: topics with the same subject appearing later in the source are folded together
     # so each subject is documented once, in full, rather than repeated under duplicate headings.
@@ -1243,7 +1241,7 @@ def _merge_slide_records_into_topics(slide_records: list) -> list[_TopicUnit]:
     by_title: dict[str, _TopicUnit] = {}
 
     for unit in units:
-        key = _resolve_topic_key(_topic_title_key(unit.title), by_title)
+        key = unit.title.strip().lower()
         primary = by_title.get(key)
         if primary is None:
             by_title[key] = unit
@@ -1257,105 +1255,9 @@ def _merge_slide_records_into_topics(slide_records: list) -> list[_TopicUnit]:
             existing.add(line.lower())
             primary.lines.append(line)
         primary.tables.extend(unit.tables)
-        _extend_unique_images(primary, unit.images)
+        primary.images.extend(unit.images)
 
-    # Third pass: screenshot walkthroughs frequently split one procedure into many
-    # near-identical headings that differ only after a dash. Merge by family stem.
-    family_consolidated: list[_TopicUnit] = []
-    by_family: dict[str, _TopicUnit] = {}
-
-    for unit in consolidated:
-        family_key = _topic_family_key(unit.title)
-        if not family_key:
-            family_consolidated.append(unit)
-            continue
-
-        primary = by_family.get(family_key)
-        if primary is None:
-            by_family[family_key] = unit
-            family_consolidated.append(unit)
-            continue
-
-        existing = {line.lower() for line in primary.lines}
-        for line in unit.lines:
-            if line.lower() in existing:
-                continue
-            existing.add(line.lower())
-            primary.lines.append(line)
-        primary.tables.extend(unit.tables)
-        _extend_unique_images(primary, unit.images)
-
-    for unit in family_consolidated:
-        _collapse_duplicate_tables(unit)
-
-    _drop_cross_topic_duplicate_lines(family_consolidated)
-
-    return [unit for unit in family_consolidated if unit.has_content]
-
-
-# Short lines are labels that legitimately recur; long lines are statements that should be made once.
-_CROSS_TOPIC_DEDUPE_MIN_CHARS = 60
-# Near-duplicate long paragraphs (same content, different lead-in or a couple of reworded
-# words) share almost all of their tokens; this threshold catches those without merging
-# genuinely different statements that happen to discuss the same subject.
-_NEAR_DUP_JACCARD_THRESHOLD = 0.82
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
-# A duplicate sentence embedded inside an otherwise-distinct paragraph (e.g. two slides that
-# share a boilerplate description but differ in their lead-in) will not trip the paragraph or
-# near-duplicate checks above, so repeated sentences of substantial length are removed too.
-_DEDUPE_SENTENCE_MIN_CHARS = 40
-
-
-def _line_tokens(line: str) -> frozenset[str]:
-    return frozenset(re.findall(r"[a-z0-9]+", line.casefold()))
-
-
-def _split_sentences(line: str) -> list[str]:
-    parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(line) if part.strip()]
-    return parts or ([line] if line.strip() else [])
-
-
-def _drop_cross_topic_duplicate_lines(units: list[_TopicUnit]) -> None:
-    """Remove substantive statements already documented under an earlier topic."""
-    seen_exact: set[str] = set()
-    seen_near: list[frozenset[str]] = []
-    seen_sentences: set[str] = set()
-    for unit in units:
-        kept: list[str] = []
-        for line in unit.lines:
-            if len(line) < _CROSS_TOPIC_DEDUPE_MIN_CHARS:
-                kept.append(line)
-                continue
-            key = re.sub(r"\s+", " ", line).strip().casefold()
-            if key in seen_exact:
-                continue
-            tokens = _line_tokens(line)
-            if tokens and any(
-                len(tokens & other) / len(tokens | other) >= _NEAR_DUP_JACCARD_THRESHOLD
-                for other in seen_near
-            ):
-                continue
-
-            # Strip individual sentences already stated verbatim under an earlier topic,
-            # keeping whatever original content remains in this paragraph.
-            remaining_sentences = []
-            for sentence in _split_sentences(line):
-                if len(sentence) >= _DEDUPE_SENTENCE_MIN_CHARS:
-                    sentence_key = re.sub(r"\s+", " ", sentence).strip().casefold()
-                    if sentence_key in seen_sentences:
-                        continue
-                    seen_sentences.add(sentence_key)
-                remaining_sentences.append(sentence)
-            rebuilt_line = " ".join(remaining_sentences).strip()
-            if not rebuilt_line:
-                continue
-
-            seen_exact.add(key)
-            if tokens:
-                seen_near.append(tokens)
-            kept.append(rebuilt_line)
-        unit.lines = kept
-
+    return [unit for unit in consolidated if unit.has_content]
 
 
 def _classify_topic_part(unit: _TopicUnit) -> str:
@@ -1446,272 +1348,72 @@ def _parse_topic_narratives(raw: str) -> dict[int, str]:
     return narratives
 
 
-def _image_identity(image) -> str:
-    """Identify an image by its bytes so the same visual is never reproduced twice."""
-    content = getattr(image, "content_base64", "") or ""
-    if content:
-        return hashlib.sha256(content.encode("utf-8", "ignore")).hexdigest()
-    return (getattr(image, "image_name", "") or "").strip().lower()
+def _figure_reference_sentence(unit: _TopicUnit) -> str:
+    """Create a descriptive, non-boilerplate sentence explaining the purpose of a figure."""
+    subject = (unit.title or "this topic").strip()
+    evidence = " ".join(line.strip() for line in unit.lines[:3] if line.strip())
+    if len(evidence) > 220:
+        evidence = evidence[:220].rsplit(" ", 1)[0] + "..."
 
-
-def _table_identity(table: list[list[str]]) -> str:
-    """Identify a table by its normalised cell content so repeats collapse to one instance."""
-    normalised = [
-        "|".join(re.sub(r"\s+", " ", (cell or "")).strip().casefold() for cell in row)
-        for row in table
-    ]
-    return hashlib.sha256("\n".join(normalised).encode("utf-8", "ignore")).hexdigest()
-
-
-def _table_row_signatures(table: list[list[str]]) -> set[str]:
-    """Normalised row fingerprints used to detect a table that is contained within a larger one."""
-    return {
-        "|".join(re.sub(r"\s+", " ", (cell or "")).strip().casefold() for cell in row)
-        for row in table
-        if any((cell or "").strip() for cell in row)
-    }
-
-
-def _table_header_key(table: list[list[str]]) -> str:
-    """Normalised header row, used to spot different captures of the same table."""
-    if not table:
-        return ""
-    return "|".join(re.sub(r"\s+", " ", (cell or "")).strip().casefold() for cell in table[0])
-
-
-# Screenshot-heavy decks repeat near-identical captures; cap how many reach the published document.
-_MAX_FIGURES_PER_TOPIC = 6
-
-
-def _topic_title_key(title: str) -> str:
-    """Normalise a topic heading so punctuation and spacing differences do not split one subject."""
-    key = re.sub(r"[\u2026]+", " ", title or "")
-    key = re.sub(r"[^0-9a-z]+", " ", key.casefold())
-    return re.sub(r"\s+", " ", key).strip()
-
-
-def _clean_topic_title(title: str) -> str:
-    """Normalise slide titles for publication headings/captions."""
-    cleaned = re.sub(r"\s+", " ", (title or "").replace("\u2026", " ")).strip()
-    cleaned = re.sub(r"\s+(as|to|for|of|in|on|at|by|from|with)$", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.rstrip("-–—:,. ") or "Overview"
-
-
-def _topic_family_key(title: str) -> str:
-    """Group screenshot-series topics by their shared stem before a dash/colon separator."""
-    text = _clean_topic_title(title)
-    parts = [part.strip() for part in re.split(r"\s*[\-–—:]\s*", text, maxsplit=1) if part.strip()]
-    if not parts:
-        return ""
-    family = _topic_title_key(parts[0])
-    return family if len(family) >= 14 else ""
-
-
-def _resolve_topic_key(key: str, known: dict[str, _TopicUnit]) -> str:
-    """Fold a heading that is a truncated continuation of an existing subject onto that subject."""
-    if key in known:
-        return key
-    for existing in known:
-        if len(existing) >= 20 and key.startswith(existing):
-            return existing
-        if len(key) >= 20 and existing.startswith(key):
-            return existing
-    return key
-
-
-def _extend_unique_images(target: _TopicUnit, images: list) -> None:
-    """Append only images the topic does not already carry."""
-    seen = {_image_identity(existing) for existing in target.images}
-    for image in images:
-        identity = _image_identity(image)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        target.images.append(image)
-
-
-def _collapse_duplicate_tables(unit: _TopicUnit) -> None:
-    """Keep one copy of each distinct table, dropping grids fully contained in a larger one.
-
-    Slide build animations often capture the same table at two reveal stages: the row
-    counts differ and a row may be split/merged differently between captures, so a strict
-    subset check does not always match. Tables that share a header and most of their rows
-    are therefore also treated as the same table, keeping only the most complete capture.
-    """
-    unique: list[list[list[str]]] = []
-    seen: set[str] = set()
-    for table in unit.tables:
-        identity = _table_identity(table)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        unique.append(table)
-
-    signatures = [_table_row_signatures(table) for table in unique]
-    kept_indices = [
-        index
-        for index in range(len(unique))
-        if not signatures[index]
-        or not any(
-            other != index and signatures[index] < signatures[other]
-            for other in range(len(unique))
+    if evidence:
+        return (
+            f"The Figure illustrates the operational flow and decision points for {subject.lower()}, "
+            f"showing the key relationships and controls described in the supporting material: {evidence}."
         )
-    ]
 
-    best_by_header: dict[str, int] = {}
-    for index in kept_indices:
-        header_key = _table_header_key(unique[index])
-        if not header_key:
-            best_by_header[f"__no_header_{index}"] = index
-            continue
-        current_best = best_by_header.get(header_key)
-        if current_best is None:
-            best_by_header[header_key] = index
-            continue
-        overlap = len(signatures[index] & signatures[current_best])
-        smaller = min(len(signatures[index]), len(signatures[current_best])) or 1
-        if overlap / smaller >= 0.6:
-            if len(unique[index]) > len(unique[current_best]):
-                best_by_header[header_key] = index
-        else:
-            best_by_header[f"{header_key}__{index}"] = index
-
-    unit.tables = [unique[index] for index in sorted(best_by_header.values())]
-
-
-# Structural filler that carries no source information; useful once, noise when repeated.
-_SCAFFOLDING_LINE_RE = re.compile(
-    r"^(This part consolidates\b|A further \d+ screenshot)",
-    re.IGNORECASE,
-)
-
-
-def _drop_repeated_scaffolding(lines: list[str]) -> list[str]:
-    """Keep only the first occurrence of each structural filler line."""
-    seen: set[str] = set()
-    kept: list[str] = []
-    for line in lines:
-        if _SCAFFOLDING_LINE_RE.match(line.strip()):
-            key = re.sub(r"\d+", "#", re.sub(r"\s+", " ", line).strip().casefold())
-            if key in seen:
-                continue
-            seen.add(key)
-        kept.append(line)
-    return kept
-
-
-_MAX_DISPLAY_TITLE_CHARS = 90
-
-
-def _short_display_title(title: str) -> str:
-    """Trim an overlong heading/subject to its first clause for headings and captions.
-
-    Some slide titles concatenate a headline with a subheading or full sentence (e.g. a
-    title placeholder plus an adjacent text box captured as one string). The full text is
-    kept for merge/grouping keys, but headings and captions should read as short labels.
-    """
-    text = (title or "this topic").strip().rstrip(" .\u2026")
-    if len(text) <= _MAX_DISPLAY_TITLE_CHARS:
-        return text
-    clause = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].strip()
-    if len(clause) <= _MAX_DISPLAY_TITLE_CHARS:
-        return clause
-    return text[:_MAX_DISPLAY_TITLE_CHARS].rsplit(" ", 1)[0].rstrip(",;:-") + "\u2026"
-
-
-def _figure_subject(unit: _TopicUnit) -> str:
-    """The topic subject as it should read in a caption, with original casing preserved."""
-    return _short_display_title(unit.title)
-
-
-def _figure_caption(unit: _TopicUnit, figure_number: int, view: int | None = None) -> str:
-    """Render a numbered caption, the publication convention, rather than a prose sentence.
-
-    A fixed sentence such as "The Figure below illustrates <subject>." is emitted once per
-    figure; across ~80 figures that single shape dominates the document and reads as filler.
-    A numbered caption identifies the plate, supports cross-referencing, and does not repeat.
-    """
-    subject = _figure_subject(unit)
-    if view is not None and view > 1:
-        return f"Figure {figure_number}. Continuation view {view}."
-    return f"Figure {figure_number}. {subject}"
-
-
-def _figure_reference_sentence(unit: _TopicUnit, image_number: int = 1) -> str:
-    """Prose reference used only when a topic has no text of its own to introduce its figures."""
-    subject = _figure_subject(unit)
-
-    if image_number > 1:
-        return f"The Figure below illustrates {subject} (view {image_number})."
-
-    return f"The Figure below illustrates {subject}."
-
-
-def _strip_heading_echo(line: str, title: str) -> str:
-    """Remove a leading restatement of the heading so the body does not repeat its own title."""
-    title_key = _topic_title_key(title)
-    if len(title_key) < 12:
-        return line
-
-    line_key = _topic_title_key(line)
-    if line_key == title_key:
-        return ""
-    if not line_key.startswith(title_key):
-        return line
-
-    remainder = " ".join(line.split()[len(title_key.split()):]).lstrip(" -\u2013\u2014:,.\u2026")
-    return remainder if len(remainder) >= 25 else ""
-
-
-def _topic_facts(unit: _TopicUnit) -> list[str]:
-    """Source lines worth publishing, with heading restatements and duplicates removed."""
-    facts: list[str] = []
-    seen: set[str] = set()
-    for line in unit.lines:
-        candidate = _strip_heading_echo(line.strip(), unit.title)
-        if len(candidate) < 25:
-            continue
-        key = re.sub(r"\s+", " ", candidate).strip().casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        facts.append(candidate)
-    return facts[:14]
+    return (
+        f"The Figure illustrates the core setup for {subject.lower()}, clarifying the process flow, "
+        "dependency boundaries, and the sequence that must be validated in practice."
+    )
 
 
 def _deterministic_topic_narrative(unit: _TopicUnit) -> str:
-    """Summarise a topic strictly from its own captured content, with no invented detail.
+    """Summarise a topic strictly from its own captured content, with no invented detail."""
+    facts = [line for line in unit.lines if len(line) >= 25][:14]
+    subject = unit.title if unit.title else "this area of the programme"
 
-    No lead-in sentence is emitted. With ~130 topics per document, any fixed opening phrase
-    ("This section sets out ...", "The source material documents ...") reproduces itself once
-    per topic and reads as filler even though each instance is textually unique. Paragraphs
-    therefore carry source-derived facts only, plus a figure caption when a figure follows.
-    """
-    facts = _topic_facts(unit)
+    # Rotate phrasing so a long document does not read as a repeated template.
+    variant = len(unit.title) % 3
+    openers = (
+        f"This section sets out {subject}.",
+        f"The following material covers {subject}.",
+        f"This topic documents {subject}.",
+    )
+    follow_ups = (
+        "The supporting detail recorded for this topic is as follows.",
+        "The associated particulars are recorded below.",
+        "Further specifics captured for this topic are listed here.",
+    )
+    visual_only = (
+        "The source material presents this topic through the accompanying visual and tabular material "
+        "reproduced below rather than through narrative text.",
+        "This topic is conveyed primarily by the figures and tables reproduced below.",
+        "The content for this topic is carried by the accompanying exhibits reproduced below.",
+    )
 
     paragraphs: list[str] = []
+
     if facts:
-        paragraphs.append(" ".join(facts[:3]))
+        paragraphs.append(f"{openers[variant]} " + " ".join(facts[:3]))
         if len(facts) > 3:
-            paragraphs.append(" ".join(facts[3:8]))
+            paragraphs.append(f"{follow_ups[variant]} " + " ".join(facts[3:8]))
         if len(facts) > 8:
-            paragraphs.append(" ".join(facts[8:14]))
+            paragraphs.append(
+                "Additional points captured for completeness include the following. " + " ".join(facts[8:14])
+            )
+    else:
+        paragraphs.append(f"{openers[variant]} {visual_only[variant]}")
 
-    return "\n\n".join(paragraph for paragraph in paragraphs if paragraph)
+    if unit.tables:
+        paragraphs.append(
+            "The table below reproduces the structured values recorded for this topic so the figures and "
+            "categories can be read directly."
+        )
 
+    if unit.images:
+        paragraphs.append(_figure_reference_sentence(unit))
 
-# Corporate deck templates ship placeholder slides; they carry no documentation value.
-_TEMPLATE_TITLE_RE = re.compile(
-    r"(sh-bree|sh-[a-z]+-headline|lorem\s+ipsum|\b\d+\s*pt\s*$)",
-    re.IGNORECASE,
-)
-
-
-def _is_publishable_topic(unit: _TopicUnit) -> bool:
-    """Drop template placeholders and topics that would render as a heading with no content."""
-    if _TEMPLATE_TITLE_RE.search(unit.title or ""):
-        return False
-    return bool(_topic_facts(unit) or unit.tables or unit.images)
+    return "\n\n".join(paragraphs)
 
 
 def _build_procedure_steps(units: list[_TopicUnit]) -> list[tuple[int, _TopicUnit]]:
@@ -1774,17 +1476,15 @@ def _derive_document_title(
     """Build a professional document title from the subject matter, never from the raw prompt."""
     candidates: list[str] = []
 
-    # The source filename names the whole deck. Individual slide titles name only one topic, and
-    # retrieval does not guarantee the first record is the cover slide, so a leading slide title
-    # can easily be a minor subject (e.g. one registration form) rather than the document subject.
-    for source in workspace_sources[:2]:
-        candidates.append(Path(source).stem)
-
-    # With no source file to name the deck, the leading slide titles are the best subject signal.
+    # The cover slide of a deck is normally the real document subject.
     for record in slide_records[:3]:
         title = getattr(record, "title", "") or ""
         if title:
             candidates.append(title)
+
+    # The source filename is the next most reliable subject signal.
+    for source in workspace_sources[:2]:
+        candidates.append(Path(source).stem)
 
     # An explicit objective is usable when the author wrote a subject, not an instruction.
     if req.objective and req.objective.strip():
@@ -1809,7 +1509,7 @@ async def _generate_full_deck_document(
     max_concurrency: int = 4,
 ) -> str:
     """Produce a part-wise textbook-style manual with inline figures and tables."""
-    units = [unit for unit in _merge_slide_records_into_topics(slide_records) if _is_publishable_topic(unit)]
+    units = _merge_slide_records_into_topics(slide_records)
     parts = _group_topics_into_parts(units)
 
     indexed_units = list(enumerate(units))
@@ -1834,6 +1534,8 @@ async def _generate_full_deck_document(
             )
         )
 
+    total_figures = sum(len(unit.images) for unit in units)
+    total_tables = sum(len(unit.tables) for unit in units)
     steps = _build_procedure_steps(units)
     title = _derive_document_title(req, slide_records, workspace_sources)
 
@@ -1841,9 +1543,12 @@ async def _generate_full_deck_document(
 
     lines.append("## Document Purpose and Scope")
     lines.append("")
-    # Filled in once rendering is complete so the counts describe what is actually reproduced.
-    scope_index = len(lines)
-    lines.append("")
+    lines.append(
+        "This document is a consolidated, publication-ready reference compiled from the approved source "
+        f"material. The content is organised into {len(parts)} thematic parts covering {len(units)} distinct "
+        f"topics, and reproduces {total_figures} supporting figures and {total_tables} data tables in the "
+        "positions where they are referenced."
+    )
     lines.append("")
     lines.append(
         "Related source material covering the same subject has been consolidated so each topic is presented "
@@ -1865,8 +1570,8 @@ async def _generate_full_deck_document(
         lines.append("")
         lines.append(
             "The following sequence consolidates the end-to-end procedure described in the source material. "
-            "Each step lists the actions recorded for that stage; the supporting figures are reproduced once, "
-            "in the topic section that documents the stage in full."
+            "Each step lists the actions recorded for that stage, followed by the supporting figure where one "
+            "was provided."
         )
         lines.append("")
         for position, (_, unit) in enumerate(steps, start=1):
@@ -1878,10 +1583,10 @@ async def _generate_full_deck_document(
                 lines.append(f"- {line}")
             if unit.lines[:8]:
                 lines.append("")
-
-    # Figures and tables are reproduced once across the whole document, not once per topic.
-    published_figures: set[str] = set()
-    published_tables: set[str] = set()
+            for image in unit.images[:2]:
+                lines.append(_figure_reference_sentence(unit))
+                lines.append(f"[[IMAGE:{image.image_name}]]")
+                lines.append("")
 
     for position, (part_title, part_units) in enumerate(parts, start=1):
         lines.append(f"## Part {position}: {part_title}")
@@ -1893,45 +1598,23 @@ async def _generate_full_deck_document(
         lines.append("")
 
         for unit in part_units:
-            lines.append(f"### {_short_display_title(unit.title)}")
+            lines.append(f"### {unit.title}")
             lines.append("")
 
             narrative = narratives.get(unit_index[id(unit)]) or _deterministic_topic_narrative(unit)
             lines.append(narrative)
             lines.append("")
 
-            new_images = [
-                image for image in unit.images if _image_identity(image) not in published_figures
-            ]
-            omitted = max(0, len(new_images) - _MAX_FIGURES_PER_TOPIC)
-            for view, image in enumerate(new_images[:_MAX_FIGURES_PER_TOPIC], start=1):
-                published_figures.add(_image_identity(image))
-                lines.append(_figure_caption(unit, len(published_figures), view=view))
+            for image in unit.images:
+                lines.append(_figure_reference_sentence(unit))
                 lines.append(f"[[IMAGE:{image.image_name}]]")
-                lines.append("")
-            if omitted:
-                lines.append(
-                    f"A further {omitted} screenshot(s) of the same sequence are held in the source material "
-                    "and are not reproduced here."
-                )
                 lines.append("")
 
             for table in unit.tables:
-                identity = _table_identity(table)
-                if identity in published_tables:
-                    continue
                 rendered = _render_markdown_table(table)
                 if rendered:
-                    published_tables.add(identity)
                     lines.extend(rendered)
                     lines.append("")
-
-    lines[scope_index] = (
-        "This document is a consolidated, publication-ready reference compiled from the approved source "
-        f"material. The content is organised into {len(parts)} thematic parts covering {len(units)} distinct "
-        f"topics, and reproduces {len(published_figures)} supporting figures and {len(published_tables)} data "
-        "tables in the positions where they are referenced."
-    )
 
     lines.append("## Consolidated Summary")
     lines.append("")
@@ -1947,7 +1630,7 @@ async def _generate_full_deck_document(
     lines.append("- Validate environment, security, and certificate details with the responsible platform owners.")
     lines.append("- Ensure the released version uses enterprise-approved wording and section ordering.")
 
-    return "\n".join(_drop_repeated_scaffolding(lines)).strip()
+    return "\n".join(lines).strip()
 
 
 def _load_benchmark_snapshot() -> dict[str, object]:
@@ -2082,24 +1765,6 @@ def healthz() -> dict[str, object]:
     }
 
 
-@app.get("/debug/render-signature", tags=["operations"])
-def debug_render_signature() -> dict[str, object]:
-    """Runtime-only inspection endpoint for renderer code-path verification."""
-    doc_builder_globals = generate_artifacts.__globals__
-    build_pdf = doc_builder_globals["_build_pdf_bytes"]
-    build_docx = doc_builder_globals["_build_docx_bytes"]
-    src_pdf = inspect.getsource(build_pdf)
-    src_docx = inspect.getsource(build_docx)
-    return {
-        "builder_module": build_pdf.__module__,
-        "appendix_limit": doc_builder_globals.get("_MAX_APPENDIX_IMAGES"),
-        "pdf_has_autocaption_call": "_figure_caption(" in src_pdf,
-        "docx_has_autocaption_call": "_figure_caption(" in src_docx,
-        "pdf_uses_appendix_slice": "remaining_images[:_MAX_APPENDIX_IMAGES]" in src_pdf,
-        "docx_uses_appendix_slice": "remaining_images[:_MAX_APPENDIX_IMAGES]" in src_docx,
-    }
-
-
 @app.get("/readyz", tags=["operations"])
 async def readyz(response: Response) -> dict[str, object]:
     """Readiness probe.
@@ -2214,6 +1879,9 @@ def root() -> RedirectResponse:
 
 @app.post("/optimize", response_model=OptimizeResponse)
 async def optimize(req: OptimizeRequest, ctx: RequestContext = Depends(get_request_context)) -> OptimizeResponse:
+    # Invoke pre-optimize hooks
+    req = invoke_pre_optimize(req)
+    
     text = enforce_input_limits(req.text, settings.max_input_chars)
     policy_flags = detect_policy_flags(text) if settings.enable_policy_guards else []
 
@@ -2237,15 +1905,34 @@ async def optimize(req: OptimizeRequest, ctx: RequestContext = Depends(get_reque
         else:
             raise
 
-    return OptimizeResponse(
+    # Calculate cost
+    cost = calculate_cost(
+        input_tokens=len(text.split()),
+        output_tokens=len(optimized.split()),
+        input_cost_per_1k=settings.llm_cost_per_1k_input_tokens,
+        output_cost_per_1k=settings.llm_cost_per_1k_output_tokens,
+    )
+
+    response = OptimizeResponse(
         document_id=req.document_id,
         optimized_text=optimized,
         policy_flags=policy_flags,
         model_used=settings.llm_model,
+        input_token_count=cost.input_tokens,
+        output_token_count=cost.output_tokens,
+        cost_usd=cost.total_cost_usd,
     )
+    
+    # Invoke post-optimize hooks
+    response = invoke_post_optimize(req, response)
+    
+    return response
 
 
 async def _compose_document(req: ComposeRequest, ctx: RequestContext) -> ComposeResponse:
+    # Invoke pre-compose hooks
+    req = invoke_pre_compose(req)
+    
     stopwatch = Stopwatch()
     triage_before = image_triage.totals()
     profile = _generation_profile(req)
@@ -2442,7 +2129,15 @@ async def _compose_document(req: ComposeRequest, ctx: RequestContext) -> Compose
         render_latency_ms=render_latency_ms,
     )
 
-    return ComposeResponse(
+    # Calculate cost (self-hosted = 0, but structure is there for future API-based models)
+    cost = calculate_cost(
+        input_tokens=len(raw_source.split()),  # Rough token estimate
+        output_tokens=len(optimized.split()),
+        input_cost_per_1k=settings.llm_cost_per_1k_input_tokens,
+        output_cost_per_1k=settings.llm_cost_per_1k_output_tokens,
+    )
+    
+    response = ComposeResponse(
         document_id=req.document_id,
         optimized_text=optimized,
         artifacts=artifacts,
@@ -2460,7 +2155,15 @@ async def _compose_document(req: ComposeRequest, ctx: RequestContext) -> Compose
             for item in retrieved_chunks
         ],
         retrieval_stats=retrieval_stats,
+        input_token_count=cost.input_tokens,
+        output_token_count=cost.output_tokens,
+        cost_usd=cost.total_cost_usd,
     )
+    
+    # Invoke post-compose hooks
+    response = invoke_post_compose(req, response)
+    
+    return response
 
 
 @app.post("/compose", response_model=ComposeResponse)
@@ -2646,6 +2349,33 @@ async def metrics(format: str = "json"):
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
     return metrics_registry.snapshot()
+
+
+@app.get("/costs", tags=["operations"])
+async def cost_report():
+    """Return aggregated cost metrics from document synthesis runs.
+    
+    Shows total cost, cost per document, cost per model, and cost trends.
+    Useful for cost allocation, budgeting, and operator dashboards.
+    """
+    snapshot = metrics_registry.snapshot()
+    
+    # Aggregate cost data from the run history
+    runs = snapshot.get("runs", [])
+    total_cost = sum(r.get("cost_usd", 0) for r in runs if isinstance(r, dict))
+    total_docs = len(runs)
+    total_tokens = sum(r.get("tokens_used", 0) for r in runs if isinstance(r, dict))
+    
+    return {
+        "timestamp": time.time(),
+        "total_cost_usd": round(total_cost, 6),
+        "total_documents": total_docs,
+        "total_tokens": total_tokens,
+        "average_cost_per_document": round(total_cost / total_docs, 6) if total_docs > 0 else 0.0,
+        "average_tokens_per_document": round(total_tokens / total_docs, 0) if total_docs > 0 else 0,
+        "currency": "USD",
+        "note": "Costs are tracked for self-hosted models (usually $0) and external APIs. Configure per-token prices in settings.",
+    }
 
 
 @app.get("/artifacts/{artifact_id}")

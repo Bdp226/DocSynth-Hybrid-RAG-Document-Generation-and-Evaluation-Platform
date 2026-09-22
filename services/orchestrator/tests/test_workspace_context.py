@@ -11,6 +11,7 @@ from app.workspace_context import build_workspace_context
 from app.workspace_context import extract_pptx_slide_records
 from app.workspace_context import extract_workspace_images_from_paths
 from app.workspace_context import _looks_like_noise_line, _normalize_slide_title
+from app.workspace_context import select_workspace_files
 
 
 def test_person_rosters_are_filtered_but_domain_phrases_are_kept() -> None:
@@ -118,6 +119,21 @@ def test_build_workspace_context_diversifies_redundant_chunks(tmp_path: Path) ->
     assert context
     assert len(retrieved) == 2
     assert stats.returned_chunks == 2
+
+
+def test_select_workspace_files_restricts_to_explicit_hints(tmp_path: Path) -> None:
+    (tmp_path / "Sandbox environment.pptx").write_bytes(b"pptx-bytes")
+    (tmp_path / "vibe_coding_talks.pptx").write_bytes(b"pptx-bytes")
+    (tmp_path / "sample-technical-reference.pdf").write_bytes(b"pdf-bytes")
+
+    selected = select_workspace_files(
+        workspace_root=tmp_path,
+        user_prompt="create a technical document with publication-ready structure",
+        hints=["Sandbox environment.pptx"],
+        max_docs=4,
+    )
+
+    assert [path.name for path in selected] == ["Sandbox environment.pptx"]
 
 
 def test_extract_workspace_images_from_pptx(tmp_path: Path) -> None:

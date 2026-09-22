@@ -14,7 +14,7 @@ from pypdf import PdfReader
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-from .image_intelligence import assess_image
+from .image_intelligence import ImageAssessment, assess_image
 from .models import ImageInput
 from .retrieval import BM25Index, reciprocal_rank_fusion
 from .telemetry import record_image_verdict
@@ -79,6 +79,14 @@ _MEETING_CHATTER_RE = re.compile(
 # Long consolidated paragraphs carry real content even when a participant is named mid-sentence;
 # only short conversational fragments are discarded outright.
 _MAX_CHATTER_LINE_CHARS = 240
+
+# Software/process documentation topics should prefer screenshots/diagrams.
+_SOFTWARE_WORKFLOW_HINT_RE = re.compile(
+    r"\b(azure|portal|vm|virtual\s+machine|api|openai|request|ticket|dashboard|"
+    r"cost\s+analysis|resource\s+group|stepwise|workflow|setup|configuration|"
+    r"platform|ide|coding|sdlc|devops|security|governance|service\s+catalog)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -164,6 +172,27 @@ def _looks_like_noise_line(line: str) -> bool:
     if len(_tokenize(stripped)) == 0 and not re.search(r"\d", stripped):
         return True
     return False
+
+
+def _looks_like_software_workflow_topic(title: str, lines: list[str]) -> bool:
+    """Return True when a slide topic is primarily software/process oriented."""
+    sample = " ".join(([title] if title else []) + lines[:6])
+    hits = len(_SOFTWARE_WORKFLOW_HINT_RE.findall(sample))
+    return hits >= 2
+
+
+def _is_image_relevant_for_topic(verdict: ImageAssessment, title: str, lines: list[str]) -> bool:
+    """Keep informative captures; only suppress likely portrait photos in workflow topics."""
+    if not verdict.include:
+        return False
+    if verdict.category == "photo" and _looks_like_software_workflow_topic(title, lines):
+        # Workflow decks legitimately contain screenshot-like captures that the
+        # triage model labels as "photo" due low texture. Keep those wide
+        # UI-style images and suppress only portrait-like personal photos.
+        portrait_like = 0.75 <= verdict.aspect_ratio <= 1.4
+        if portrait_like and verdict.skin_ratio >= 0.08:
+            return False
+    return True
 
 
 def _clean_extracted_text(text: str) -> str:
@@ -359,6 +388,8 @@ def _slide_images(
     source_stem: str,
     slide,
     slide_number: int,
+    slide_title: str,
+    slide_lines: list[str],
     seen_hashes: set[str],
     min_image_bytes: int,
     max_images_per_slide: int = 3,
@@ -393,7 +424,7 @@ def _slide_images(
         # withheld so only documentary visuals reach the published artefact.
         verdict = assess_image(blob)
         record_image_verdict(verdict)
-        if not verdict.include:
+        if not _is_image_relevant_for_topic(verdict, slide_title, slide_lines):
             continue
 
         figure_index += 1
@@ -423,7 +454,6 @@ def extract_pptx_slide_records(
         return []
 
     records: list[SlideRecord] = []
-    seen_hashes: set[str] = set()
     total_images = 0
 
     for slide_number, slide in enumerate(prs.slides, start=1):
@@ -463,7 +493,7 @@ def extract_pptx_slide_records(
 
         images: list[ImageInput] = []
         if total_images < max_total_images:
-            images = _slide_images(path.stem, slide, slide_number, seen_hashes, min_image_bytes)
+            images = _slide_images(path.stem, slide, slide_number, title, lines, set(), min_image_bytes)
             total_images += len(images)
 
         if not lines and not images and not title and not tables:
@@ -624,9 +654,31 @@ def _score_file(path: Path, prompt_tokens: set[str], hints: list[str]) -> int:
     return score
 
 
+def _path_matches_hint(path: Path, hint: str) -> bool:
+    """True when a workspace file matches an explicit user hint by name or path fragment."""
+    value = (hint or "").strip()
+    if not value:
+        return False
+
+    path_norm = str(path).replace("\\", "/").casefold()
+    hint_norm = value.replace("\\", "/").casefold()
+    hint_name = Path(value).name.casefold()
+
+    if hint_name and path.name.casefold() == hint_name:
+        return True
+    return hint_norm in path_norm
+
+
 def select_workspace_files(workspace_root: Path, user_prompt: str, hints: list[str], max_docs: int = 5) -> list[Path]:
     prompt_tokens = _tokenize(user_prompt)
     candidates = list(_iter_workspace_files(workspace_root))
+
+    explicit_hints = [hint.strip() for hint in hints if hint and hint.strip()]
+    if explicit_hints:
+        matched = [path for path in candidates if any(_path_matches_hint(path, hint) for hint in explicit_hints)]
+        if matched:
+            candidates = matched
+
     ranked = sorted(candidates, key=lambda p: _score_file(p, prompt_tokens, hints), reverse=True)
 
     selected: list[Path] = []

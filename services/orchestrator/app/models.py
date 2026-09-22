@@ -15,6 +15,9 @@ class OptimizeResponse(BaseModel):
     optimized_text: str
     policy_flags: list[str]
     model_used: str
+    input_token_count: int = 0
+    output_token_count: int = 0
+    cost_usd: float = 0.0
 
 
 class DocumentArtifact(BaseModel):
@@ -61,3 +64,6 @@ class ComposeResponse(BaseModel):
     workspace_sources: list[str] = Field(default_factory=list)
     retrieval_chunks: list[dict[str, str | float]] = Field(default_factory=list)
     retrieval_stats: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    input_token_count: int = 0
+    output_token_count: int = 0
+    cost_usd: float = 0.0

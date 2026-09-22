@@ -179,7 +179,7 @@ def test_clean_topic_title_drops_trailing_truncation_tokens() -> None:
     )
 
 
-def test_merge_topics_groups_same_family_walkthrough_headings() -> None:
+def test_merge_topics_keeps_distinct_walkthrough_steps_in_order() -> None:
     records = [
         SimpleNamespace(
             title="Azure Cost Analysis Stepwise Process – Visiting the Azure Portal",
@@ -197,9 +197,11 @@ def test_merge_topics_groups_same_family_walkthrough_headings() -> None:
 
     merged = main._merge_slide_records_into_topics(records)
 
-    assert len(merged) == 1
-    assert "Azure Cost Analysis Stepwise Process" in merged[0].title
-    assert len(merged[0].lines) == 2
+    assert len(merged) == 2
+    assert merged[0].title.startswith("Azure Cost Analysis Stepwise Process")
+    assert merged[1].title.startswith("Azure Cost Analysis Stepwise Process")
+    assert len(merged[0].lines) == 1
+    assert len(merged[1].lines) == 1
 
 
 def test_repeated_structural_filler_is_emitted_only_once() -> None:
@@ -591,23 +593,13 @@ def test_parse_topic_narratives_accepts_loose_markers() -> None:
     assert narratives[1].startswith("This is the second narrative")
 
 
-def test_full_deck_retries_missing_topics(tmp_path: Path, monkeypatch) -> None:
+def test_full_deck_uses_topic_local_deterministic_narrative(tmp_path: Path, monkeypatch) -> None:
     settings.artifact_storage_dir = str(tmp_path)
     calls: list[str] = []
 
     async def fake_generate(prompt: str, model_override=None, images=None) -> str:
         calls.append(prompt)
-        if "[TOPIC 0]" in prompt and "[TOPIC 1]" in prompt:
-            return (
-                "[TOPIC 0]\n"
-                "First topic narrative that is long enough to be retained and published as LLM-authored content."
-            )
-        if "[TOPIC 1]" in prompt:
-            return (
-                "[TOPIC 1]\n"
-                "Second topic narrative recovered by the repair pass and long enough to replace fallback prose."
-            )
-        return ""
+        return "[TOPIC 0]\nThis should not be used."
 
     slide_records = [
         SimpleNamespace(title="Overview", lines=["A" * 120], tables=[], images=[]),
@@ -626,9 +618,9 @@ def test_full_deck_retries_missing_topics(tmp_path: Path, monkeypatch) -> None:
         )
     )
 
-    assert "First topic narrative" in result
-    assert "Second topic narrative recovered by the repair pass" in result
-    assert any("Do NOT omit any topic" in prompt for prompt in calls)
+    assert "A" * 80 in result
+    assert "B" * 80 in result
+    assert not calls
 
 
 def test_compose_async_job_returns_persisted_result(tmp_path: Path, monkeypatch) -> None:

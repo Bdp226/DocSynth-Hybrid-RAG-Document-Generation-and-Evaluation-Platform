@@ -19,6 +19,7 @@ from reportlab.platypus import (
     Image as RLImage,
     ListFlowable,
     ListItem,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -71,6 +72,13 @@ _EXPLICIT_CAPTION_RE = re.compile(r"^\s*Figure\s+\d+[.:]\s")
 # traceability; dumping every remaining image (sometimes 100+) makes the appendix
 # unusable, so only a bounded, representative sample is published.
 _MAX_APPENDIX_IMAGES = 24
+
+
+def _normalized_heading_key(value: str) -> str:
+    """Normalise heading/body text for duplicate-heading suppression."""
+    key = re.sub(r"\b(\d{1,3})\s+(st|nd|rd|th)\b", r"\1\2", value or "", flags=re.IGNORECASE)
+    key = re.sub(r"[^0-9a-z]+", " ", key.casefold())
+    return re.sub(r"\s+", " ", key).strip()
 
 
 def _caption_subject(section_title: str) -> str:
@@ -307,9 +315,11 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
     story = []
     bullet_buffer: list[str] = []
     table_buffer: list[str] = []
+    pending_caption: str | None = None
     title_used = False
     figure_number = 0
     current_section = ""
+    seen_part_heading = False
     previous_line = ""
     image_lookup = _image_lookup(image_inputs)
     used_image_names: set[str] = set()
@@ -374,6 +384,12 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
 
     for raw_line in text.split("\n"):
         line = raw_line.strip()
+        image_token = _IMAGE_TOKEN_RE.match(line)
+
+        if pending_caption and not image_token:
+            story.append(Paragraph(_markdown_to_reportlab_markup(pending_caption), body_style))
+            pending_caption = None
+
         if not line:
             flush_bullets()
             flush_table()
@@ -386,7 +402,6 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
             continue
         flush_table()
 
-        image_token = _IMAGE_TOKEN_RE.match(line)
         if image_token:
             flush_bullets()
             image_name = image_token.group(1).strip()
@@ -395,10 +410,22 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
                 used_image_names.add(image_name)
                 flowable = _pdf_image_flowable(image_bytes, width=PDF_MAX_WIDTH_PT, height=PDF_MAX_HEIGHT_PT)
                 if flowable is not None:
+                    if pending_caption:
+                        story.append(Paragraph(_markdown_to_reportlab_markup(pending_caption), body_style))
+                        pending_caption = None
                     story.append(Spacer(1, 6))
                     story.append(flowable)
                     # Captions are authored by the composer directly in markdown.
                     # Do not synthesize an additional renderer-side caption.
+                else:
+                    pending_caption = None
+            else:
+                pending_caption = None
+            previous_line = line
+            continue
+
+        if _EXPLICIT_CAPTION_RE.match(line):
+            pending_caption = line
             previous_line = line
             continue
 
@@ -426,14 +453,23 @@ def _build_pdf_bytes(text: str, image_inputs: list[ImageInput] | None = None) ->
             story.append(Paragraph(_markdown_to_reportlab_markup(heading), h3_style))
         elif line.startswith("## ") or _looks_like_heading(line):
             heading = line[3:].strip() if line.startswith("## ") else line
+            if heading.lower().startswith("part "):
+                if seen_part_heading:
+                    story.append(PageBreak())
+                seen_part_heading = True
             current_section = heading
             story.append(Paragraph(_markdown_to_reportlab_markup(heading), h2_style))
         else:
+            if current_section and _normalized_heading_key(line) == _normalized_heading_key(current_section):
+                previous_line = line
+                continue
             story.append(Paragraph(_markdown_to_reportlab_markup(line), body_style))
         previous_line = line
 
     flush_bullets()
     flush_table()
+    if pending_caption:
+        story.append(Paragraph(_markdown_to_reportlab_markup(pending_caption), body_style))
     remaining_images = [image for image in (image_inputs or []) if image.image_name not in used_image_names]
     if remaining_images:
         story.append(Spacer(1, 14))
@@ -504,9 +540,11 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
 
     bullet_buffer: list[str] = []
     table_buffer: list[str] = []
+    pending_caption: str | None = None
     title_used = False
     figure_number = 0
     current_section = ""
+    seen_part_heading = False
     image_lookup = _image_lookup(image_inputs)
     used_image_names: set[str] = set()
 
@@ -542,6 +580,13 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
 
     for raw_line in text.split("\n"):
         line = raw_line.strip()
+        image_token = _IMAGE_TOKEN_RE.match(line)
+
+        if pending_caption and not image_token:
+            paragraph = doc.add_paragraph()
+            _add_markdown_runs_docx(paragraph, pending_caption)
+            pending_caption = None
+
         if not line:
             flush_bullets()
             flush_table()
@@ -553,7 +598,6 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
             continue
         flush_table()
 
-        image_token = _IMAGE_TOKEN_RE.match(line)
         if image_token:
             flush_bullets()
             image_name = image_token.group(1).strip()
@@ -561,9 +605,22 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
             if image_bytes is not None:
                 used_image_names.add(image_name)
                 if _docx_add_picture(doc, image_bytes):
+                    if pending_caption:
+                        paragraph = doc.add_paragraph()
+                        _add_markdown_runs_docx(paragraph, pending_caption)
+                        pending_caption = None
                     # Captions are authored by the composer directly in markdown.
                     # Do not synthesize an additional renderer-side caption.
                     pass
+                else:
+                    pending_caption = None
+            else:
+                pending_caption = None
+            previous_line = line
+            continue
+
+        if _EXPLICIT_CAPTION_RE.match(line):
+            pending_caption = line
             previous_line = line
             continue
 
@@ -591,16 +648,26 @@ def _build_docx_bytes(text: str, image_inputs: list[ImageInput] | None = None) -
             _add_markdown_runs_docx(heading_para, heading)
         elif line.startswith("## ") or _looks_like_heading(line):
             heading = line[3:].strip() if line.startswith("## ") else line
+            if heading.lower().startswith("part "):
+                if seen_part_heading:
+                    doc.add_page_break()
+                seen_part_heading = True
             current_section = heading
             heading_para = doc.add_heading(level=2)
             _add_markdown_runs_docx(heading_para, heading)
         else:
+            if current_section and _normalized_heading_key(line) == _normalized_heading_key(current_section):
+                previous_line = line
+                continue
             body_para = doc.add_paragraph()
             _add_markdown_runs_docx(body_para, line)
         previous_line = line
 
     flush_bullets()
     flush_table()
+    if pending_caption:
+        paragraph = doc.add_paragraph()
+        _add_markdown_runs_docx(paragraph, pending_caption)
 
     remaining_images = [image for image in (image_inputs or []) if image.image_name not in used_image_names]
     if remaining_images:
